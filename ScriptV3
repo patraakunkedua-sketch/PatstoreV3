@@ -1,0 +1,3214 @@
+local Players      = game:GetService("Players")
+local TweenSvc     = game:GetService("TweenService")
+local UISvc        = game:GetService("UserInputService")
+local RunService   = game:GetService("RunService")
+local VIM          = game:GetService("VirtualInputManager")
+local Lighting     = game:GetService("Lighting")
+
+local _player      = Players.LocalPlayer
+local _pGui        = _player:WaitForChild("PlayerGui")
+local TweenService = TweenSvc
+local UIS          = UISvc
+local RS           = game:GetService("ReplicatedStorage")
+
+local player    = _player
+local playerGui = _pGui
+local character = player.Character or player.CharacterAdded:Wait()
+local hrp       = character:WaitForChild("HumanoidRootPart")
+
+local CFG = {
+	WATER_WAIT = 20, COOK_WAIT = 46,
+	ITEM_WATER      = "Water",
+	ITEM_SUGAR      = "Sugar Block Bag",
+	ITEM_GEL        = "Gelatin",
+	ITEM_EMPTY      = "Empty Bag",
+	ITEM_MS_SMALL   = "Small Marshmallow Bag",
+	ITEM_MS_MEDIUM  = "Medium Marshmallow Bag",
+	ITEM_MS_LARGE   = "Large Marshmallow Bag",
+	SELL_RADIUS     = 10,
+	BUY_RADIUS      = 10,
+	SELL_TIMEOUT    = 10,
+}
+
+-- Apart data: floor path, stove path, bawah kompor position
+local APART_DATA = {
+	[1] = {
+		name       = "Apart 1",
+		floorPath  = {"Map","Houses","WH1","Interior","Floor"},
+		stovePath  = {"Map","Houses","WH1","Interior","Stove"},
+		bawahPos   = Vector3.new(1144.343994140625, 7.0567426681518555, 450.73486328125),
+		telePos    = Vector3.new(1137.992, 9.932, 449.753),
+	},
+	[2] = {
+		name       = "Apart 2",
+		floorPath  = {"Map","Houses","BH3","Interior","Floor"},
+		stovePath  = {"Map","Houses","BH3","Interior","Stove"},
+		bawahPos   = Vector3.new(1144.19482421875, 7.056742191314697, 422.2895812988281),
+		telePos    = Vector3.new(1139.174, 9.932, 420.556),
+	},
+	[3] = {
+		name       = "Apart 3",
+		floorPath  = {"Map","Houses","BH2","Interior","Floor"},
+		stovePath  = {"Map","Houses","BH2","Interior","Stove"},
+		bawahPos   = Vector3.new(982.1166381835938, 7.056741714477539, 248.42929077148438),
+		telePos    = Vector3.new(984.856, 9.932, 247.280),
+	},
+	[4] = {
+		name       = "Apart 4",
+		floorPath  = {"Map","Houses","BH4","Interior","Floor"},
+		stovePath  = {"Map","Houses","BH4","Interior","Stove"},
+		bawahPos   = Vector3.new(982.3760375976562, 7.056741714477539, 220.20864868164062),
+		telePos    = Vector3.new(988.311, 9.932, 221.664),
+	},
+	[5] = {
+		name       = "Apart 5",
+		floorPath  = {"Map","Houses","LT1","Interior","Floor"},
+		stovePath  = {"Map","Houses","LT1","Interior","Stove"},
+		bawahPos   = Vector3.new(926.12158203125, 7.0567426681518555, 36.963871002197266),
+		telePos    = Vector3.new(923.954, 9.932, 42.202),
+	},
+	[6] = {
+		name       = "Apart 6",
+		floorPath  = {"Map","Houses","BH1","Interior","Floor"},
+		stovePath  = {"Map","Houses","BH1","Interior","Stove"},
+		bawahPos   = Vector3.new(897.2954711914062, 7.0567426681518555, 36.4017333984375),
+		telePos    = Vector3.new(895.721, 9.932, 41.928),
+	},
+}
+
+local remotes         = RS:WaitForChild("RemoteEvents")
+local storePurchaseRE = remotes:FindFirstChild("StorePurchase")
+local rpcRE           = remotes:FindFirstChild("RPC")
+
+local isRunning   = false
+local isBusy      = false
+local totalSold   = 0
+local totalBuy    = 0
+local stats       = {small=0, medium=0, large=0}
+
+local noclipEnabled = false
+local noclipConn    = nil
+
+local function totalMS() return stats.small + stats.medium + stats.large end
+
+-- ── UTILITIES ──────────────────────────────────────
+local function countItem(name)
+	local n = 0
+	for _, t in ipairs(player.Backpack:GetChildren()) do
+		if t.Name == name then n += 1 end
+	end
+	local ch = player.Character
+	if ch then
+		for _, t in ipairs(ch:GetChildren()) do
+			if t:IsA("Tool") and t.Name == name then n += 1 end
+		end
+	end
+	return n
+end
+
+local function countAllMS()
+	return countItem(CFG.ITEM_MS_SMALL) + countItem(CFG.ITEM_MS_MEDIUM) + countItem(CFG.ITEM_MS_LARGE)
+end
+
+local function getEquippableMS()
+	if countItem(CFG.ITEM_MS_SMALL)  > 0 then return CFG.ITEM_MS_SMALL  end
+	if countItem(CFG.ITEM_MS_MEDIUM) > 0 then return CFG.ITEM_MS_MEDIUM end
+	if countItem(CFG.ITEM_MS_LARGE)  > 0 then return CFG.ITEM_MS_LARGE  end
+	return nil
+end
+
+local function hasAllIngredients()
+	return countItem(CFG.ITEM_WATER) >= 1
+		and countItem(CFG.ITEM_SUGAR) >= 1
+		and countItem(CFG.ITEM_GEL)   >= 1
+end
+
+local function equipTool(name)
+	local ch = player.Character
+	if not ch then return false end
+	local hum = ch:FindFirstChildOfClass("Humanoid")
+	local t   = player.Backpack:FindFirstChild(name)
+	if hum and t then hum:EquipTool(t) task.wait(0.2) return true end
+	return false
+end
+
+local function unequipAll()
+	local ch = player.Character
+	if not ch then return end
+	local hum = ch:FindFirstChildOfClass("Humanoid")
+	if hum then hum:UnequipTools() end
+end
+
+local function pressE()
+	pcall(function()
+		VIM:SendKeyEvent(true,  Enum.KeyCode.E, false, game)
+		task.wait(0.15)
+		VIM:SendKeyEvent(false, Enum.KeyCode.E, false, game)
+	end)
+end
+
+local function safeFireProximity(obj)
+	pcall(function()
+		if fireproximityprompt then
+			fireproximityprompt(obj)
+		else
+			local event = obj.PromptButtonHoldBegan
+			if event then
+				VIM:SendKeyEvent(true, obj.KeyCode, false, game)
+				task.wait(0.1)
+				VIM:SendKeyEvent(false, obj.KeyCode, false, game)
+			end
+		end
+	end)
+end
+
+local function firePromptNearby(radius)
+	local ch   = player.Character
+	local root = ch and ch:FindFirstChild("HumanoidRootPart")
+	if not root then return end
+	radius = radius or 8
+	for _, obj in ipairs(workspace:GetDescendants()) do
+		if obj:IsA("ProximityPrompt") then
+			local part = obj.Parent
+			if part and part:IsA("BasePart") then
+				if (root.Position - part.Position).Magnitude <= radius then
+					safeFireProximity(obj)
+				end
+			end
+		end
+	end
+end
+
+local function fireCookingPotNearby(radius)
+	local ch   = player.Character
+	local root = ch and ch:FindFirstChild("HumanoidRootPart")
+	if not root then return end
+	radius = radius or 15
+	for _, obj in ipairs(workspace:GetDescendants()) do
+		if obj:IsA("ProximityPrompt") then
+			local anc      = obj.Parent
+			local cookPart = nil
+			while anc do
+				if anc:IsA("BasePart") and anc.Name == "Cooking Pot" then
+					cookPart = anc
+					break
+				end
+				anc = anc.Parent
+			end
+			if cookPart and (root.Position - cookPart.Position).Magnitude <= radius then
+				safeFireProximity(obj)
+			end
+		end
+	end
+end
+
+-- ── STATUS ─────────────────────────────────────────
+local lblStatus
+local function setStatus(msg, color)
+	if lblStatus then
+		lblStatus.Text       = msg
+		lblStatus.TextColor3 = color or Color3.fromRGB(155, 165, 200)
+	end
+end
+
+-- ── AUTO JUAL ──────────────────────────────────────
+local function doAutoSell(setStatus2)
+	local msTotal = countAllMS()
+	if msTotal == 0 then
+		setStatus2("ℹ️ Tidak ada MS", Color3.fromRGB(160, 160, 180))
+		return
+	end
+	setStatus2("💰 Memulai jual " .. msTotal .. " MS...", Color3.fromRGB(50, 210, 110))
+	task.wait(0.3)
+	local sold       = 0
+	local maxFail    = 5
+	local failStreak = 0
+	while countAllMS() > 0 do
+		local msName = getEquippableMS()
+		if not msName then break end
+		local ok = equipTool(msName)
+		if not ok then
+			failStreak += 1
+			setStatus2("❌ Gagal equip (" .. failStreak .. "/" .. maxFail .. ")", Color3.fromRGB(210, 40, 40))
+			task.wait(1)
+			if failStreak >= maxFail then break end
+			continue
+		end
+		local bS = countItem(CFG.ITEM_MS_SMALL)
+		local bM = countItem(CFG.ITEM_MS_MEDIUM)
+		local bL = countItem(CFG.ITEM_MS_LARGE)
+		task.wait(0.2)
+		pressE()
+		task.wait(0.3)
+		firePromptNearby(CFG.SELL_RADIUS)
+		task.wait(0.3)
+		pressE()
+		local elapsed = 0
+		local terjual = false
+		while elapsed < CFG.SELL_TIMEOUT do
+			local diff = (bS - countItem(CFG.ITEM_MS_SMALL))
+				+ (bM - countItem(CFG.ITEM_MS_MEDIUM))
+				+ (bL - countItem(CFG.ITEM_MS_LARGE))
+			if diff > 0 then
+				sold      += diff
+				totalSold += diff
+				terjual    = true
+				failStreak = 0
+				break
+			end
+			task.wait(0.3)
+			elapsed += 0.3
+		end
+		if terjual then
+			setStatus2("💰 Terjual " .. sold .. " | Sisa: " .. countAllMS(), Color3.fromRGB(50, 210, 110))
+			task.wait(0.2)
+		else
+			failStreak += 1
+			setStatus2("⚠️ Tidak terjual (" .. failStreak .. "/" .. maxFail .. ")", Color3.fromRGB(255, 155, 35))
+			task.wait(1.2)
+			if failStreak >= maxFail then
+				setStatus2("❌ Gagal. Dekati NPC!", Color3.fromRGB(210, 40, 40))
+				break
+			end
+		end
+	end
+	unequipAll()
+	if sold > 0 then
+		setStatus2("✅ Terjual " .. sold .. " MS (total: " .. totalSold .. ")", Color3.fromRGB(50, 210, 110))
+	else
+		setStatus2("⚠️ Tidak ada MS terjual. Dekati NPC!", Color3.fromRGB(255, 155, 35))
+	end
+	task.wait(1)
+end
+
+-- ── AUTO BELI ──────────────────────────────────────
+local buyQty  = {1, 1, 1}
+local buyBusy = false
+
+local BUY_ITEMS = {
+	{name="Gelatin",         display="🟡 Gelatin"},
+	{name="Sugar Block Bag", display="🧂 Sugar Block Bag"},
+	{name="Water",           display="💧 Water"},
+}
+
+local function doAutoBuy(setStatus2, overrideQty)
+	if not storePurchaseRE then
+		setStatus2("❌ Remote tidak ada!", Color3.fromRGB(210, 40, 40))
+		task.wait(1.5)
+		return
+	end
+	local totalBought = 0
+	for idx, item in ipairs(BUY_ITEMS) do
+		local qty = overrideQty or buyQty[idx] or 1
+		setStatus2("🛒 Beli " .. item.display .. " ×" .. qty .. "...", Color3.fromRGB(100, 180, 255))
+		local before     = countItem(item.name)
+		local successBuy = 0
+		for i = 1, qty do
+			local ok = pcall(function()
+				storePurchaseRE:FireServer(item.name, 1)
+			end)
+			if ok then successBuy = successBuy + 1 end
+			task.wait(0.4)
+		end
+		local timeout = 0
+		local gained  = 0
+		repeat
+			task.wait(0.2)
+			timeout = timeout + 0.2
+			gained  = countItem(item.name) - before
+		until gained >= qty or timeout > 6
+		if gained < qty then
+			local missing = qty - gained
+			setStatus2("🔁 Retry " .. missing .. " " .. item.display, Color3.fromRGB(255, 160, 40))
+			for i = 1, missing do
+				pcall(function() storePurchaseRE:FireServer(item.name, 1) end)
+				task.wait(0.5)
+			end
+			timeout = 0
+			repeat
+				task.wait(0.2)
+				timeout = timeout + 0.2
+				gained  = countItem(item.name) - before
+			until gained >= qty or timeout > 5
+		end
+		totalBought = totalBought + gained
+		totalBuy    = totalBuy    + gained
+		if gained < qty then
+			setStatus2("⚠️ " .. item.display .. " kurang (" .. gained .. "/" .. qty .. ")", Color3.fromRGB(255, 120, 120))
+		else
+			setStatus2("✅ " .. item.display .. " ×" .. gained .. " selesai!", Color3.fromRGB(80, 220, 130))
+		end
+		task.wait(0.2)
+	end
+	setStatus2("✅ Beli selesai! " .. totalBought .. " item.", Color3.fromRGB(80, 220, 130))
+	task.wait(1)
+end
+
+-- ── AUTO MASAK ─────────────────────────────────────
+local function countdown(secs, fmt, color)
+	for i = secs, 1, -1 do
+		if not isRunning then return false end
+		setStatus(string.format(fmt, i), color)
+		task.wait(1)
+	end
+	return true
+end
+
+local function cookInteract(toolName, radius)
+	if toolName then
+		equipTool(toolName)
+		task.wait(0.2)
+	end
+	fireCookingPotNearby(radius or 8)
+end
+
+local rpcQueue = {}
+
+if rpcRE then
+	rpcRE.OnClientEvent:Connect(function(_, tblArg)
+		if type(tblArg) ~= "table" then return end
+		local v1  = tblArg[1]
+		local v2  = tblArg[2]
+		local msg = tostring(v1 or ""):lower()
+		if v2 == "TextLabel" and tonumber(v1) then
+			table.insert(rpcQueue, {type="timer", secs=tonumber(v1)})
+			return
+		end
+		if msg:find("boil") or msg:find("water") then
+			table.insert(rpcQueue, {type="wait_boil"})
+		elseif msg:find("sugar") then
+			table.insert(rpcQueue, {type="add_sugar"})
+		elseif msg:find("gelatin") then
+			table.insert(rpcQueue, {type="add_gelatin"})
+		elseif msg:find("cook") then
+			table.insert(rpcQueue, {type="wait_cook"})
+		elseif msg:find("bag") then
+			table.insert(rpcQueue, {type="bag_result"})
+		end
+	end)
+end
+
+local function waitRPC(instrType, timeout)
+	local start = tick()
+	while tick() - start < timeout do
+		for i = 1, #rpcQueue do
+			local inst = rpcQueue[i]
+			if inst and inst.type == instrType then
+				table.remove(rpcQueue, i)
+				return inst
+			end
+		end
+		task.wait(0.1)
+	end
+	return nil
+end
+
+local function popTimer()
+	for i = 1, #rpcQueue do
+		local v = rpcQueue[i]
+		if v.type == "timer" then
+			table.remove(rpcQueue, i)
+			return v.secs
+		end
+	end
+	return nil
+end
+
+local function doOneCook()
+	isBusy = true
+	table.clear(rpcQueue)
+	local snapS = countItem(CFG.ITEM_MS_SMALL)
+	local snapM = countItem(CFG.ITEM_MS_MEDIUM)
+	local snapL = countItem(CFG.ITEM_MS_LARGE)
+	setStatus("💧 Masukkan Water...", Color3.fromRGB(100, 180, 255))
+	cookInteract(CFG.ITEM_WATER)
+	local boilSecs
+	for _ = 1, 30 do
+		boilSecs = popTimer()
+		if boilSecs then break end
+		task.wait(0.1)
+	end
+	boilSecs = boilSecs or CFG.WATER_WAIT
+	if not countdown(boilSecs, "💧 Mendidih... ⏱ %ds", Color3.fromRGB(80, 150, 255)) then
+		isBusy = false
+		return false
+	end
+	setStatus("🧂 Tunggu Sugar...", Color3.fromRGB(255, 220, 100))
+	waitRPC("add_sugar", 10)
+	setStatus("🧂 Masukkan Sugar...", Color3.fromRGB(255, 220, 100))
+	cookInteract(CFG.ITEM_SUGAR)
+	setStatus("🟡 Tunggu Gelatin...", Color3.fromRGB(255, 200, 50))
+	waitRPC("add_gelatin", 10)
+	setStatus("🟡 Masukkan Gelatin...", Color3.fromRGB(255, 200, 50))
+	cookInteract(CFG.ITEM_GEL)
+	local cookSecs
+	for _ = 1, 30 do
+		cookSecs = popTimer()
+		if cookSecs then break end
+		task.wait(0.1)
+	end
+	cookSecs = cookSecs or CFG.COOK_WAIT
+	if not countdown(cookSecs, "🔥 Memasak... ⏱ %ds", Color3.fromRGB(80, 140, 255)) then
+		isBusy = false
+		return false
+	end
+	setStatus("🎒 Tunggu Bag...", Color3.fromRGB(100, 160, 255))
+	waitRPC("bag_result", 12)
+	local bag
+	local t = 0
+	repeat
+		bag = player.Backpack:FindFirstChild(CFG.ITEM_EMPTY)
+		task.wait(0.3)
+		t += 0.3
+	until bag or t > 10
+	if not bag then
+		setStatus("❌ Empty Bag tidak ada!", Color3.fromRGB(210, 40, 40))
+		isBusy = false
+		return false
+	end
+	setStatus("🎒 Ambil Marshmallow...", Color3.fromRGB(100, 180, 255))
+	cookInteract(CFG.ITEM_EMPTY)
+	local waitMS = 0
+	local newS, newM, newL
+	repeat
+		task.wait(0.3)
+		waitMS += 0.3
+		newS = countItem(CFG.ITEM_MS_SMALL)  - snapS
+		newM = countItem(CFG.ITEM_MS_MEDIUM) - snapM
+		newL = countItem(CFG.ITEM_MS_LARGE)  - snapL
+	until (newS > 0 or newM > 0 or newL > 0) or waitMS > 8
+	if newS > 0 then
+		stats.small  += newS
+	elseif newM > 0 then
+		stats.medium += newM
+	elseif newL > 0 then
+		stats.large  += newL
+	else
+		stats.small  += 1
+	end
+	setStatus("✅ MS ke-" .. totalMS() .. " selesai!", Color3.fromRGB(80, 210, 255))
+	isBusy = false
+	return true
+end
+
+local function autoLoop()
+	while isRunning do
+		if not hasAllIngredients() then
+			setStatus("❌ Bahan habis!", Color3.fromRGB(210, 40, 40))
+			isRunning = false
+			break
+		end
+		doOneCook()
+		task.wait(0.3)
+	end
+end
+
+-- ── TELEPORT ───────────────────────────────────────
+local isTeleporting     = false
+local PRISON_POS        = Vector3.new(551.3455200195312, 3.66213321685791, -564.9028930664062)
+local NPC_MS_POS        = Vector3.new(510.061, 4.476, 600.548)
+local pendingRespawnPos = nil
+
+local function moveVehicle(vehicle, targetPos)
+	local anchor = vehicle.PrimaryPart
+		or vehicle:FindFirstChildOfClass("VehicleSeat")
+		or vehicle:FindFirstChildOfClass("BasePart")
+	if not anchor then return end
+	local spawnPos = targetPos + Vector3.new(0, 0.5, 0)
+	local newCF    = CFrame.new(spawnPos, spawnPos + Vector3.new(0, 0, 1))
+	for _, p in ipairs(vehicle:GetDescendants()) do
+		if p:IsA("BasePart") then
+			pcall(function()
+				p.AssemblyLinearVelocity  = Vector3.zero
+				p.AssemblyAngularVelocity = Vector3.zero
+				p.Anchored = true
+			end)
+		end
+	end
+	task.wait(0.05)
+	if vehicle.PrimaryPart then
+		vehicle:SetPrimaryPartCFrame(newCF)
+	else
+		anchor.CFrame = newCF
+	end
+	task.wait(0.05)
+	for _, p in ipairs(vehicle:GetDescendants()) do
+		if p:IsA("BasePart") then
+			pcall(function()
+				p.Anchored = false
+				p.AssemblyLinearVelocity  = Vector3.zero
+				p.AssemblyAngularVelocity = Vector3.zero
+			end)
+		end
+	end
+end
+
+local function stepTeleport(targetPos)
+	if isTeleporting then return end
+	local ch  = player.Character
+	local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+	if not ch or not hum then return end
+	isTeleporting = true
+	task.spawn(function()
+		local seatPart = hum.SeatPart
+		if seatPart then
+			local vehicle = seatPart:FindFirstAncestorOfClass("Model")
+			if vehicle then moveVehicle(vehicle, targetPos) end
+		else
+			local root = ch:FindFirstChild("HumanoidRootPart")
+			if root then
+				pcall(function() root.CFrame = CFrame.new(targetPos + Vector3.new(0, 3, 0)) end)
+			end
+		end
+		isTeleporting = false
+	end)
+end
+
+local function respawnTeleport(targetPos)
+	if isTeleporting then return end
+	isTeleporting     = true
+	pendingRespawnPos = targetPos
+	setStatus("☠️ Respawn ke titik...", Color3.fromRGB(255, 160, 40))
+	local ch  = player.Character
+	local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+	if hum then
+		pcall(function() hum.Health = 0 end)
+	else
+		isTeleporting = false
+	end
+end
+
+local function fullyTeleport(targetPos)
+	local ch  = player.Character
+	local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+	if not ch or not hum then task.wait(1) return end
+	local seatPart = hum.SeatPart
+	if seatPart then
+		local vehicle = seatPart:FindFirstAncestorOfClass("Model")
+		if vehicle then
+			moveVehicle(vehicle, targetPos)
+			task.wait(0.5)
+		end
+	else
+		local root = ch:FindFirstChild("HumanoidRootPart")
+		if root then
+			pcall(function() root.CFrame = CFrame.new(targetPos + Vector3.new(0, 3, 0)) end)
+		end
+		task.wait(0.5)
+	end
+end
+
+player.CharacterAdded:Connect(function(newChar)
+	character = newChar
+	if pendingRespawnPos then
+		local pos = pendingRespawnPos
+		pendingRespawnPos = nil
+		task.wait(1.5)
+		local root = newChar:WaitForChild("HumanoidRootPart", 5)
+		if root then
+			pcall(function() root.CFrame = CFrame.new(pos + Vector3.new(0, 3, 0)) end)
+		end
+		isTeleporting = false
+		setStatus("✅ Respawn teleport selesai!", Color3.fromRGB(80, 220, 130))
+	else
+		isTeleporting = false
+	end
+end)
+
+-- ── UNDERGROUND SYSTEM ──────────────────────────────
+local originalBaseplate     = nil
+local originalBaseplateSize = nil
+local undergroundPart       = nil
+local isUnderground         = false
+local SURFACE_Y             = 3
+
+local function findBaseplate()
+	for _, v in ipairs(workspace:GetChildren()) do
+		if v:IsA("Part") and v.Name:lower():find("baseplate") then
+			return v
+		end
+	end
+	return workspace:FindFirstChild("Baseplate")
+end
+
+local function resizeBaseplateForUnderground()
+	local bp = findBaseplate()
+	if not bp then return false end
+	if not originalBaseplate then
+		originalBaseplate     = bp
+		originalBaseplateSize = bp.Size
+	end
+	pcall(function()
+		bp.Size         = Vector3.new(2048, 5, 2048)
+		bp.CFrame       = CFrame.new(0, -7.5, 0)
+		bp.Anchored     = true
+		bp.CanCollide   = true
+		bp.Transparency = 0.5
+		bp.Material     = Enum.Material.Granite
+	end)
+	return true
+end
+
+local function restoreBaseplate()
+	if originalBaseplate and originalBaseplateSize then
+		pcall(function()
+			originalBaseplate.Size   = originalBaseplateSize
+			originalBaseplate.CFrame = CFrame.new(0, -2, 0)
+		end)
+	end
+end
+
+local function teleportCharToPos(pos, underground)
+	local ch   = player.Character
+	local root = ch and ch:FindFirstChild("HumanoidRootPart")
+	if not root then return false end
+	local oldCollide = {}
+	for _, part in ipairs(ch:GetDescendants()) do
+		if part:IsA("BasePart") then
+			oldCollide[part] = part.CanCollide
+			part.CanCollide  = false
+		end
+	end
+	pcall(function()
+		root.CFrame = CFrame.new(pos + Vector3.new(0, underground and 2 or 2, 0))
+	end)
+	task.wait(0.1)
+	for part, col in pairs(oldCollide) do
+		if part and part.Parent then
+			part.CanCollide = col
+		end
+	end
+	return true
+end
+
+local function enableUnderground()
+	if isUnderground then return end
+	resizeBaseplateForUnderground()
+	-- create underground zone
+	if undergroundPart then pcall(function() undergroundPart:Destroy() end) end
+	local ch   = player.Character
+	local root = ch and ch:FindFirstChild("HumanoidRootPart")
+	if not root then return false end
+	undergroundPart = Instance.new("Part")
+	undergroundPart.Name         = "UndergroundZone"
+	undergroundPart.Size         = Vector3.new(50, 1, 50)
+	undergroundPart.Anchored     = true
+	undergroundPart.CanCollide   = false
+	undergroundPart.Transparency = 0.8
+	undergroundPart.BrickColor   = BrickColor.new("Really black")
+	undergroundPart.Parent       = workspace
+	local ugPos = Vector3.new(root.Position.X, -5, root.Position.Z)
+	undergroundPart.CFrame = CFrame.new(ugPos)
+	teleportCharToPos(ugPos, true)
+	isUnderground = true
+	setStatus("🕳️ Underground aktif! (Y = -5)", Color3.fromRGB(100, 180, 255))
+	return true
+end
+
+local function disableUnderground()
+	if not isUnderground then return end
+	local ch   = player.Character
+	local root = ch and ch:FindFirstChild("HumanoidRootPart")
+	if root then
+		teleportCharToPos(Vector3.new(root.Position.X, SURFACE_Y, root.Position.Z), false)
+	end
+	if undergroundPart then
+		pcall(function() undergroundPart:Destroy() end)
+		undergroundPart = nil
+	end
+	restoreBaseplate()
+	isUnderground = false
+	setStatus("⬆️ Kembali ke permukaan (Y = 3)", Color3.fromRGB(80, 220, 130))
+end
+
+-- ── APART FLOOR / STOVE DELETE ──────────────────────
+local deletedParts   = {}   -- store {part, parent, cf, name} for potential undo
+local selectedApart  = 1
+
+local function getPartByPath(pathTable)
+	local obj = workspace
+	for _, seg in ipairs(pathTable) do
+		obj = obj:FindFirstChild(seg)
+		if not obj then return nil end
+	end
+	return obj
+end
+
+local function deleteApartFloorStove(apartIdx)
+	local data = APART_DATA[apartIdx]
+	if not data then return false, "Apart tidak valid" end
+	local floor = getPartByPath(data.floorPath)
+	local stove = getPartByPath(data.stovePath)
+	local deleted = 0
+	if floor then
+		table.insert(deletedParts, {name=floor.Name, parent=floor.Parent, cf=floor.CFrame, size=floor.Size, class=floor.ClassName})
+		pcall(function() floor:Destroy() end)
+		deleted += 1
+	end
+	if stove then
+		table.insert(deletedParts, {name=stove.Name, parent=stove.Parent, cf=stove.CFrame, size=stove.Size, class=stove.ClassName})
+		pcall(function() stove:Destroy() end)
+		deleted += 1
+	end
+	if deleted == 0 then
+		return false, "Floor/Stove tidak ditemukan (sudah dihapus?)"
+	end
+	return true, "✅ Hapus " .. deleted .. " part dari " .. data.name
+end
+
+local function doUndergroundApart(apartIdx)
+	local data = APART_DATA[apartIdx]
+	if not data then return end
+	-- 1) enable underground
+	if not isUnderground then enableUnderground() end
+	task.wait(0.3)
+	-- 2) tp ke bawah kompor
+	local ch   = player.Character
+	local root = ch and ch:FindFirstChild("HumanoidRootPart")
+	if root then
+		pcall(function() root.CFrame = CFrame.new(data.bawahPos) end)
+	end
+	setStatus("🍳 Bawah kompor " .. data.name .. " aktif!", Color3.fromRGB(255, 200, 50))
+end
+
+-- ── AUTO FULLY (MOTOR) ─────────────────────────────
+local fullyRunning  = false
+local fullyTarget   = 10
+local fullySavedPos = nil
+
+local function doAutoFully(setFullyStatus)
+	fullyRunning = true
+	local anchorConn = RunService.Heartbeat:Connect(function()
+		if not fullyRunning then return end
+		local ch = player.Character
+		local hm = ch and ch:FindFirstChildOfClass("Humanoid")
+		local sp = hm and hm.SeatPart
+		if sp then
+			local veh = sp:FindFirstAncestorOfClass("Model")
+			if veh then
+				for _, p in ipairs(veh:GetDescendants()) do
+					if p:IsA("BasePart") then
+						pcall(function()
+							p.AssemblyLinearVelocity  = Vector3.zero
+							p.AssemblyAngularVelocity = Vector3.zero
+						end)
+					end
+				end
+			end
+		end
+	end)
+	while fullyRunning do
+		local target = fullyTarget
+		setFullyStatus("🏪 Teleport ke NPC Marshmallow...", Color3.fromRGB(100, 180, 255))
+		fullyTeleport(NPC_MS_POS)
+		if not fullyRunning then break end
+		setFullyStatus("🛒 Beli bahan untuk " .. target .. " MS...", Color3.fromRGB(100, 180, 255))
+		doAutoBuy(setFullyStatus, target)
+		if not fullyRunning then break end
+		task.wait(0.5)
+		if fullySavedPos then
+			setFullyStatus("🏠 Teleport ke Apart...", Color3.fromRGB(148, 80, 255))
+			fullyTeleport(fullySavedPos)
+		end
+		if not fullyRunning then break end
+		setFullyStatus("🔥 Mulai masak " .. target .. " MS...", Color3.fromRGB(82, 130, 255))
+		isRunning = true
+		local cooked = 0
+		while fullyRunning and hasAllIngredients() do
+			local ok = doOneCook()
+			if ok then cooked += 1 end
+			if fullyRunning then task.wait(0.3) end
+		end
+		isRunning = false
+		if not fullyRunning then break end
+		setFullyStatus("✅ " .. cooked .. " MS selesai! Siap jual...", Color3.fromRGB(52, 210, 110))
+		task.wait(0.2)
+		setFullyStatus("💰 Teleport ke NPC untuk jual...", Color3.fromRGB(52, 210, 110))
+		fullyTeleport(NPC_MS_POS)
+		if not fullyRunning then break end
+		setFullyStatus("💰 Jual semua MS...", Color3.fromRGB(52, 210, 110))
+		doAutoSell(setFullyStatus)
+		if not fullyRunning then break end
+		task.wait(0.2)
+		setFullyStatus("🔄 Loop berikutnya...", Color3.fromRGB(100, 180, 255))
+		task.wait(0.2)
+	end
+	fullyRunning = false
+	anchorConn:Disconnect()
+end
+
+-- ── AUTO FULLY NO MOTOR (UNDERGROUND) ──────────────
+local fullyNMRunning  = false
+local fullyNMTarget   = 10
+local fullyNMSavedPos = nil
+
+local function simpleTP(targetPos)
+	-- simple character teleport (no motor)
+	local ch  = player.Character
+	local root = ch and ch:FindFirstChild("HumanoidRootPart")
+	if root then
+		pcall(function() root.CFrame = CFrame.new(targetPos + Vector3.new(0, 3, 0)) end)
+	end
+	task.wait(0.4)
+end
+
+local function doAutoFullyNoMotor(setStatus2)
+	fullyNMRunning = true
+
+	while fullyNMRunning do
+		local target = fullyNMTarget
+
+		-- 1) Pergi NPC: aktifkan underground lalu tp
+		setStatus2("🕳️ Underground ON → NPC...", Color3.fromRGB(100, 200, 255))
+		if not isUnderground then enableUnderground() task.wait(0.3) end
+		simpleTP(NPC_MS_POS)
+		if not fullyNMRunning then break end
+		-- 2) Matikan underground (ke atas)
+		disableUnderground()
+		task.wait(0.3)
+
+		-- 3) Beli bahan
+		setStatus2("🛒 Beli bahan ×" .. target .. "...", Color3.fromRGB(100, 180, 255))
+		doAutoBuy(setStatus2, target)
+		if not fullyNMRunning then break end
+		task.wait(0.5)
+
+		-- 4) Balik ke apart: underground lalu tp
+		if fullyNMSavedPos then
+			setStatus2("🕳️ Underground ON → Apart...", Color3.fromRGB(148, 80, 255))
+			if not isUnderground then enableUnderground() task.wait(0.3) end
+			simpleTP(fullyNMSavedPos)
+			-- matikan underground setelah nyampe
+			disableUnderground()
+			task.wait(0.3)
+		end
+		if not fullyNMRunning then break end
+
+		-- 5) Masak
+		setStatus2("🔥 Masak " .. target .. " MS...", Color3.fromRGB(82, 130, 255))
+		isRunning = true
+		local cooked = 0
+		while fullyNMRunning and hasAllIngredients() do
+			local ok = doOneCook()
+			if ok then cooked += 1 end
+			if fullyNMRunning then task.wait(0.3) end
+		end
+		isRunning = false
+		if not fullyNMRunning then break end
+
+		setStatus2("✅ " .. cooked .. " MS selesai!", Color3.fromRGB(52, 210, 110))
+		task.wait(0.2)
+
+		-- 6) Pergi NPC untuk jual: underground lalu tp
+		setStatus2("🕳️ Underground ON → NPC Jual...", Color3.fromRGB(52, 210, 110))
+		if not isUnderground then enableUnderground() task.wait(0.3) end
+		simpleTP(NPC_MS_POS)
+		disableUnderground()
+		task.wait(0.3)
+
+		-- 7) Jual
+		setStatus2("💰 Jual semua MS...", Color3.fromRGB(52, 210, 110))
+		doAutoSell(setStatus2)
+		if not fullyNMRunning then break end
+		task.wait(0.2)
+
+		setStatus2("🔄 Loop berikutnya...", Color3.fromRGB(100, 180, 255))
+		task.wait(0.2)
+	end
+	fullyNMRunning = false
+	-- pastikan tidak underground saat berhenti
+	if isUnderground then disableUnderground() end
+end
+
+-- ============================================================
+-- ANTI RK
+-- ============================================================
+local ANTI_RK_RADIUS    = 40
+local antiRkEnabled     = false
+local antiRkInJail      = false
+local antiRkCooldown    = false
+local PRISON_WAIT_SECS  = 60
+local antiRkStatusLabel = nil
+
+local function setAntiRkStatus(msg, col)
+	if antiRkStatusLabel then
+		antiRkStatusLabel.Text       = msg
+		antiRkStatusLabel.TextColor3 = col or Color3.fromRGB(155, 165, 200)
+	end
+end
+
+local function isPlayerNearby(radius)
+	local ch   = player.Character
+	local root = ch and ch:FindFirstChild("HumanoidRootPart")
+	if not root then return false, nil end
+	for _, plr in ipairs(Players:GetPlayers()) do
+		if plr == player then continue end
+		local oc    = plr.Character
+		local oRoot = oc and oc:FindFirstChild("HumanoidRootPart")
+		if oRoot then
+			if (root.Position - oRoot.Position).Magnitude <= radius then
+				return true, plr.Name
+			end
+		end
+	end
+	return false, nil
+end
+
+local function antiRkJailLoop()
+	if antiRkInJail then return end
+	antiRkInJail = true
+	setAntiRkStatus("🚨 Pemain terdeteksi! Ke penjara...", Color3.fromRGB(215, 50, 50))
+	setStatus("🚨 Anti RK: Ke penjara!", Color3.fromRGB(215, 50, 50))
+	local wasRunning      = isRunning
+	local wasFullyRunning = fullyRunning
+	local wasNMRunning    = fullyNMRunning
+	isRunning = false
+	fullyTeleport(PRISON_POS)
+	task.wait(0.5)
+	for i = PRISON_WAIT_SECS, 1, -1 do
+		if not antiRkEnabled then
+			antiRkInJail = false
+			return
+		end
+		local mins  = math.floor(i / 60)
+		local secs2 = i % 60
+		setAntiRkStatus(
+			string.format("🔒 Di penjara: %d:%02d tersisa", mins, secs2),
+			Color3.fromRGB(255, 160, 40)
+		)
+		task.wait(1)
+	end
+	local returnPos = fullySavedPos or fullyNMSavedPos or NPC_MS_POS
+	setAntiRkStatus("🔄 Kembali ke lokasi...", Color3.fromRGB(100, 180, 255))
+	fullyTeleport(returnPos)
+	task.wait(1)
+	local stillNear, whoAgain = isPlayerNearby(ANTI_RK_RADIUS)
+	if stillNear and antiRkEnabled then
+		setAntiRkStatus("⚠️ Masih ada " .. tostring(whoAgain) .. "! Balik penjara...", Color3.fromRGB(255, 80, 80))
+		task.wait(1)
+		antiRkInJail = false
+		task.spawn(antiRkJailLoop)
+		return
+	end
+	antiRkInJail = false
+	setAntiRkStatus("✅ Aman! Lanjut otomatis...", Color3.fromRGB(52, 210, 110))
+	setStatus("✅ Anti RK: Aman, lanjut!", Color3.fromRGB(52, 210, 110))
+end
+
+RunService.Heartbeat:Connect(function()
+	if not antiRkEnabled   then return end
+	if antiRkInJail        then return end
+	if antiRkCooldown      then return end
+	if not isRunning and not fullyRunning and not fullyNMRunning then return end
+	local nearby = isPlayerNearby(ANTI_RK_RADIUS)
+	if nearby then
+		antiRkCooldown = true
+		task.spawn(function()
+			antiRkJailLoop()
+			task.wait(2)
+			antiRkCooldown = false
+		end)
+	end
+end)
+
+-- ============================================================
+-- MACRO F
+-- ============================================================
+local macroFEnabled  = false
+local macroFInterval = 0.3
+local macroFTrigger  = "LeftMouse"
+local macroFHeld     = false
+
+UIS.InputBegan:Connect(function(input, gp)
+	if gp then return end
+	if not macroFEnabled then return end
+	if macroFTrigger == "LeftMouse" and input.UserInputType == Enum.UserInputType.MouseButton1 then
+		if not macroFHeld then
+			macroFHeld = true
+			task.spawn(function()
+				while macroFHeld and macroFEnabled do
+					pcall(function()
+						VIM:SendKeyEvent(true,  Enum.KeyCode.F, false, game)
+						task.wait(0.05)
+						VIM:SendKeyEvent(false, Enum.KeyCode.F, false, game)
+					end)
+					task.wait(macroFInterval)
+				end
+			end)
+		end
+	end
+end)
+
+UIS.InputEnded:Connect(function(input, gp)
+	if gp then return end
+	if input.UserInputType == Enum.UserInputType.MouseButton1 then
+		macroFHeld = false
+	end
+end)
+
+-- ============================================================
+-- DELETE PART
+-- ============================================================
+local altDeleteEnabled = false
+local altHeld          = false
+local _mouse           = player:GetMouse()
+local deleteHistory    = {}
+local MAX_UNDO         = 50
+local deleteCount      = 0
+local deleteCountLabel = nil
+local undoCountLabel   = nil
+
+local function updateDeleteLabels()
+	if deleteCountLabel then deleteCountLabel.Text = "Deleted: " .. deleteCount end
+	if undoCountLabel   then undoCountLabel.Text   = "Undo: "    .. #deleteHistory end
+end
+
+local function pushDeleteUndo(part)
+	if not part or not part:IsA("BasePart") then return end
+	local info = {
+		Name         = part.Name,
+		ClassName    = part.ClassName,
+		Size         = part.Size,
+		CFrame       = part.CFrame,
+		Color        = part.Color,
+		Material     = part.Material,
+		Transparency = part.Transparency,
+		Anchored     = part.Anchored,
+		CanCollide   = part.CanCollide,
+		Parent       = part.Parent,
+	}
+	table.insert(deleteHistory, info)
+	if #deleteHistory > MAX_UNDO then table.remove(deleteHistory, 1) end
+	deleteCount += 1
+	updateDeleteLabels()
+end
+
+local function undoLastDelete()
+	if #deleteHistory == 0 then
+		setStatus("⚠️ Tidak ada part untuk di-undo!", Color3.fromRGB(255, 200, 60))
+		return false
+	end
+	local info = table.remove(deleteHistory)
+	local ok, err = pcall(function()
+		local newPart          = Instance.new(info.ClassName)
+		newPart.Name           = info.Name
+		newPart.Size           = info.Size
+		newPart.CFrame         = info.CFrame
+		newPart.Color          = info.Color
+		newPart.Material       = info.Material
+		newPart.Transparency   = info.Transparency
+		newPart.Anchored       = info.Anchored
+		newPart.CanCollide     = info.CanCollide
+		newPart.Parent         = info.Parent or workspace
+	end)
+	if ok then
+		setStatus("↩️ Undo: " .. info.Name .. " dikembalikan!", Color3.fromRGB(80, 210, 160))
+	else
+		setStatus("❌ Undo gagal: " .. tostring(err), Color3.fromRGB(210, 40, 40))
+	end
+	updateDeleteLabels()
+	return ok
+end
+
+local function tryDeleteTarget(target)
+	if not altDeleteEnabled then return end
+	if target and target:IsA("BasePart") then
+		local partName = target.Name
+		pushDeleteUndo(target)
+		pcall(function() target:Destroy() end)
+		setStatus("🗑️ Deleted: " .. partName, Color3.fromRGB(255, 80, 80))
+	end
+end
+
+UIS.InputBegan:Connect(function(input, gameProcessed)
+	if input.KeyCode == Enum.KeyCode.LeftAlt or input.KeyCode == Enum.KeyCode.RightAlt then
+		altHeld = true
+	end
+end)
+UIS.InputEnded:Connect(function(input)
+	if input.KeyCode == Enum.KeyCode.LeftAlt or input.KeyCode == Enum.KeyCode.RightAlt then
+		altHeld = false
+	end
+end)
+_mouse.Button1Down:Connect(function()
+	if altDeleteEnabled and altHeld then
+		tryDeleteTarget(_mouse.Target)
+	end
+end)
+
+local touchHolding   = false
+local touchStartTick = 0
+local touchStartPos  = Vector2.zero
+local HOLD_DURATION  = 0.8
+local MOVE_THRESHOLD = 30
+
+UIS.InputBegan:Connect(function(input, gameProcessed)
+	if gameProcessed then return end
+	if not altDeleteEnabled then return end
+	if input.UserInputType == Enum.UserInputType.Touch then
+		touchHolding   = true
+		touchStartTick = tick()
+		touchStartPos  = input.Position
+		local thisTick = touchStartTick
+		task.spawn(function()
+			task.wait(HOLD_DURATION)
+			if touchHolding and touchStartTick == thisTick and altDeleteEnabled then
+				tryDeleteTarget(_mouse.Target)
+				pcall(function()
+					game:GetService("HapticService"):SetMotor(Enum.UserInputType.Gamepad1, Enum.VibrationMotor.Small, 0.5)
+					task.wait(0.1)
+					game:GetService("HapticService"):SetMotor(Enum.UserInputType.Gamepad1, Enum.VibrationMotor.Small, 0)
+				end)
+			end
+		end)
+	end
+end)
+UIS.InputEnded:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.Touch then
+		touchHolding = false
+	end
+end)
+UIS.InputChanged:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.Touch and touchHolding then
+		local delta = (input.Position - touchStartPos).Magnitude
+		if delta > MOVE_THRESHOLD then touchHolding = false end
+	end
+end)
+
+-- ============================================================
+-- COMBAT — HITBOX EXPANDER
+-- ============================================================
+local hitboxEnabled       = false
+local hitboxSize          = Vector3.new(10, 10, 10)
+local hitboxTransparency  = 1
+local HB_TARGET_PARTS     = {"Torso", "UpperTorso", "LowerTorso"}
+local hbOriginalProps     = {}
+local hbTrackedPlayers    = {}
+local hbNoCollConstraints = {}
+local hbLoopActive        = true
+
+local function hbGetLocalParts()
+	local parts = {}
+	local ch = player.Character
+	if not ch then return parts end
+	for _, v in ipairs(ch:GetDescendants()) do
+		if v:IsA("BasePart") then table.insert(parts, v) end
+	end
+	return parts
+end
+
+local function hbApplyNoCollision(targetPart)
+	if hbNoCollConstraints[targetPart] then return end
+	local localParts = hbGetLocalParts()
+	if #localParts == 0 then return end
+	hbNoCollConstraints[targetPart] = {}
+	for _, lp in ipairs(localParts) do
+		pcall(function()
+			local nc  = Instance.new("NoCollisionConstraint")
+			nc.Part0  = targetPart
+			nc.Part1  = lp
+			nc.Parent = workspace
+			table.insert(hbNoCollConstraints[targetPart], nc)
+		end)
+	end
+end
+
+local function hbRemoveAllNoCollision()
+	for _, constraints in pairs(hbNoCollConstraints) do
+		for _, nc in ipairs(constraints) do
+			pcall(function() nc:Destroy() end)
+		end
+	end
+	hbNoCollConstraints = {}
+end
+
+player.CharacterAdded:Connect(function(ch)
+	task.wait(1)
+	hbRemoveAllNoCollision()
+	if hitboxEnabled then
+		for _, plr in pairs(hbTrackedPlayers) do
+			if plr and plr.Character then
+				for _, pName in ipairs(HB_TARGET_PARTS) do
+					local part = plr.Character:FindFirstChild(pName)
+					if part and part:IsA("BasePart") then
+						hbApplyNoCollision(part)
+					end
+				end
+			end
+		end
+	end
+end)
+
+local function hbSaveProps(plr, part)
+	if not hbOriginalProps[plr.Name] then hbOriginalProps[plr.Name] = {} end
+	if not hbOriginalProps[plr.Name][part.Name] then
+		hbOriginalProps[plr.Name][part.Name] = {
+			Size         = part.Size,
+			Transparency = part.Transparency,
+			CanCollide   = part.CanCollide,
+			Massless     = part.Massless,
+		}
+	end
+end
+
+local function hbRevertAll()
+	for playerName, plr in pairs(hbTrackedPlayers) do
+		if hbOriginalProps[playerName] and plr and plr.Parent then
+			local ch = plr.Character
+			if ch then
+				for partName, props in pairs(hbOriginalProps[playerName]) do
+					local part = ch:FindFirstChild(partName)
+					if part and part:IsA("BasePart") then
+						part.Size         = props.Size
+						part.Transparency = props.Transparency
+						part.CanCollide   = props.CanCollide
+						part.Massless     = props.Massless
+					end
+				end
+			end
+		end
+	end
+	hbRemoveAllNoCollision()
+end
+
+for _, plr in ipairs(Players:GetPlayers()) do
+	if plr ~= player then hbTrackedPlayers[plr.Name] = plr end
+end
+Players.PlayerAdded:Connect(function(plr)
+	hbTrackedPlayers[plr.Name] = plr
+end)
+Players.PlayerRemoving:Connect(function(plr)
+	hbTrackedPlayers[plr.Name] = nil
+	hbOriginalProps[plr.Name]  = nil
+end)
+
+task.spawn(function()
+	while hbLoopActive do
+		if hitboxEnabled then
+			for playerName, plr in pairs(hbTrackedPlayers) do
+				if plr and plr.Parent then
+					local ch  = plr.Character
+					local hum = ch and ch:FindFirstChild("Humanoid")
+					if ch and hum and hum.Health > 0 then
+						for _, pName in ipairs(HB_TARGET_PARTS) do
+							local part = ch:FindFirstChild(pName)
+							if part and part:IsA("BasePart") then
+								hbSaveProps(plr, part)
+								if part.Size ~= hitboxSize then
+									part.Size         = hitboxSize
+									part.Transparency = hitboxTransparency
+									part.CanCollide   = false
+									part.Massless     = true
+								end
+								hbApplyNoCollision(part)
+							end
+						end
+					end
+				else
+					hbTrackedPlayers[playerName] = nil
+					hbOriginalProps[playerName]  = nil
+				end
+			end
+		end
+		task.wait(0.2)
+	end
+end)
+
+-- ============================================================
+-- AIM ASSIST + FOV CIRCLE
+-- ============================================================
+local aimAssistEnabled  = false
+local aimAssistStrength = 0.25
+local aimAssistRadius   = 120
+local aimFOVEnabled     = true
+local aimLocked     = false
+local aimLockedPart = nil
+local _camera = workspace.CurrentCamera
+
+local function isMobileDevice()
+	return UIS.TouchEnabled and not UIS.KeyboardEnabled
+end
+
+local fovGui = Instance.new("ScreenGui")
+fovGui.Name           = "PatFOVGui"
+fovGui.ResetOnSpawn   = false
+fovGui.IgnoreGuiInset = true
+fovGui.DisplayOrder   = 9999
+pcall(function() fovGui.Parent = game.CoreGui end)
+if fovGui.Parent ~= game.CoreGui then fovGui.Parent = playerGui end
+
+local fovContainer = Instance.new("Frame")
+fovContainer.Name                   = "FOVContainer"
+fovContainer.AnchorPoint            = Vector2.new(0.5, 0.5)
+fovContainer.BackgroundTransparency = 1
+fovContainer.BorderSizePixel        = 0
+fovContainer.ZIndex                 = 9999
+fovContainer.Visible                = false
+fovContainer.Parent                 = fovGui
+
+local SEGS        = 72
+local SEG_THICK   = 2
+local fovSegments = {}
+
+for i = 1, SEGS do
+	local seg = Instance.new("Frame")
+	seg.AnchorPoint            = Vector2.new(0.5, 0.5)
+	seg.BackgroundColor3       = Color3.fromRGB(255, 200, 60)
+	seg.BackgroundTransparency = 0.25
+	seg.BorderSizePixel        = 0
+	seg.ZIndex                 = 9999
+	seg.Parent                 = fovContainer
+	fovSegments[i]             = seg
+end
+
+local function updateFOVCircle()
+	local show = aimAssistEnabled and aimFOVEnabled
+	fovContainer.Visible = show
+	if not show then return end
+	local vp  = _camera.ViewportSize
+	local r   = aimAssistRadius
+	local dia = r * 2 + SEG_THICK * 4
+	local cx, cy
+	if isMobileDevice() then
+		cx = vp.X / 2
+		cy = vp.Y / 2
+	else
+		local mousePos = UIS:GetMouseLocation()
+		cx = mousePos.X
+		cy = mousePos.Y
+	end
+	fovContainer.Position = UDim2.new(0, cx, 0, cy)
+	fovContainer.Size     = UDim2.new(0, dia, 0, dia)
+	local segColor = (aimLocked and aimLockedPart)
+		and Color3.fromRGB(255, 60, 60)
+		or  Color3.fromRGB(255, 200, 60)
+	local step = (2 * math.pi) / SEGS
+	for i, seg in ipairs(fovSegments) do
+		seg.BackgroundColor3 = segColor
+		local angle     = (i - 1) * step
+		local nextAngle = angle + step
+		local ax = math.cos(angle)
+		local ay = math.sin(angle)
+		local bx = math.cos(nextAngle)
+		local by = math.sin(nextAngle)
+		local midX  = (ax + bx) / 2 * r
+		local midY  = (ay + by) / 2 * r
+		local dx    = (bx - ax) * r
+		local dy    = (by - ay) * r
+		local segL  = math.sqrt(dx * dx + dy * dy) + 0.5
+		local rot   = math.deg(math.atan2(dy, dx))
+		seg.Size     = UDim2.new(0, segL, 0, SEG_THICK)
+		seg.Position = UDim2.new(0.5, midX - segL / 2, 0.5, midY - SEG_THICK / 2)
+		seg.Rotation = rot
+	end
+end
+
+local function getClosestPlayerOnScreen()
+	local vp           = _camera.ViewportSize
+	local screenCenter = Vector2.new(vp.X / 2, vp.Y / 2)
+	local aimCenter
+	if isMobileDevice() then
+		aimCenter = screenCenter
+	else
+		local mousePos = UIS:GetMouseLocation()
+		aimCenter = Vector2.new(mousePos.X, mousePos.Y)
+	end
+	local closestDist  = aimAssistRadius
+	local closestPart  = nil
+	for _, plr in ipairs(Players:GetPlayers()) do
+		if plr == player then continue end
+		local ch        = plr.Character
+		if not ch then continue end
+		local hrpTarget = ch:FindFirstChild("HumanoidRootPart")
+		local hum       = ch:FindFirstChildOfClass("Humanoid")
+		if not hrpTarget then continue end
+		if hum and hum.Health <= 0 then continue end
+		local screenPos, onScreen = _camera:WorldToViewportPoint(hrpTarget.Position)
+		if onScreen then
+			local dist = (Vector2.new(screenPos.X, screenPos.Y) - aimCenter).Magnitude
+			if dist < closestDist then
+				closestDist = dist
+				closestPart = hrpTarget
+			end
+		end
+	end
+	return closestPart
+end
+
+UIS.InputBegan:Connect(function(input, gp)
+	if gp then return end
+	if isMobileDevice() then return end
+	if not aimAssistEnabled then return end
+	if input.UserInputType == Enum.UserInputType.MouseButton2 then
+		if aimLocked then
+			aimLocked     = false
+			aimLockedPart = nil
+			setStatus("🎯 Aim unlock", Color3.fromRGB(255, 200, 60))
+		else
+			local target = getClosestPlayerOnScreen()
+			if target then
+				aimLocked     = true
+				aimLockedPart = target
+				local targetPlr = Players:GetPlayerFromCharacter(target.Parent)
+				local name = targetPlr and targetPlr.Name or "Target"
+				setStatus("🔴 Aim LOCKED → " .. name, Color3.fromRGB(255, 60, 60))
+			else
+				setStatus("⚠️ Tidak ada target di FOV!", Color3.fromRGB(255, 155, 35))
+			end
+		end
+	end
+end)
+
+RunService.RenderStepped:Connect(function()
+	updateFOVCircle()
+	if not aimAssistEnabled then
+		aimLocked     = false
+		aimLockedPart = nil
+		return
+	end
+	local target
+	if not isMobileDevice() and aimLocked and aimLockedPart then
+		local hum = aimLockedPart.Parent
+			and aimLockedPart.Parent:FindFirstChildOfClass("Humanoid")
+		if hum and hum.Health > 0 and aimLockedPart.Parent then
+			target = aimLockedPart
+		else
+			aimLocked     = false
+			aimLockedPart = nil
+			setStatus("⚠️ Target hilang, aim unlock!", Color3.fromRGB(255, 155, 35))
+		end
+	else
+		target = getClosestPlayerOnScreen()
+	end
+	if not target then return end
+	local currentCF = _camera.CFrame
+	local targetDir = (target.Position - currentCF.Position).Unit
+	local targetCF  = CFrame.new(currentCF.Position, currentCF.Position + targetDir)
+	_camera.CFrame  = currentCF:Lerp(targetCF, aimAssistStrength)
+end)
+
+-- ============================================================
+-- COLOR PALETTE
+-- ============================================================
+local C = {
+	bg       = Color3.fromRGB(8,   8,   14),
+	panel    = Color3.fromRGB(12,  12,  20),
+	card     = Color3.fromRGB(18,  18,  28),
+	cardHi   = Color3.fromRGB(24,  24,  36),
+	tabBg    = Color3.fromRGB(10,  10,  17),
+	line     = Color3.fromRGB(28,  28,  42),
+	lineGlow = Color3.fromRGB(40,  40,  60),
+	blue     = Color3.fromRGB(65,  120, 255),
+	blueD    = Color3.fromRGB(40,  80,  200),
+	blueGlow = Color3.fromRGB(80,  140, 255),
+	green    = Color3.fromRGB(40,  210, 120),
+	greenD   = Color3.fromRGB(25,  140, 75),
+	red      = Color3.fromRGB(220, 45,  55),
+	orange   = Color3.fromRGB(255, 150, 30),
+	purple   = Color3.fromRGB(140, 70,  255),
+	purpleD  = Color3.fromRGB(100, 45,  200),
+	cyan     = Color3.fromRGB(40,  210, 235),
+	cyanD    = Color3.fromRGB(20,  160, 190),
+	gold     = Color3.fromRGB(255, 200, 60),
+	pink     = Color3.fromRGB(255, 80,  160),
+	txt      = Color3.fromRGB(235, 238, 248),
+	txtM     = Color3.fromRGB(140, 148, 175),
+	txtD     = Color3.fromRGB(55,  60,  80),
+	txtGlow  = Color3.fromRGB(200, 210, 240),
+}
+
+-- ============================================================
+-- GUI HELPERS
+-- ============================================================
+local function mkFrame(p, bg, zi)
+	local f = Instance.new("Frame")
+	f.BackgroundColor3 = bg or C.card
+	f.BorderSizePixel  = 0
+	f.ZIndex           = zi or 2
+	if p then f.Parent = p end
+	return f
+end
+
+local function mkLabel(p, txt, col, font, xa, zi, ts)
+	local l = Instance.new("TextLabel")
+	l.BackgroundTransparency = 1
+	l.Text           = txt  or ""
+	l.TextColor3     = col  or C.txt
+	l.Font           = font or Enum.Font.Gotham
+	l.TextXAlignment = xa   or Enum.TextXAlignment.Left
+	l.ZIndex         = zi   or 3
+	if ts then l.TextScaled = false l.TextSize = ts
+	else       l.TextScaled = true end
+	if p then l.Parent = p end
+	return l
+end
+
+local function mkBtn(p, txt, col, font, zi, ts)
+	local b = Instance.new("TextButton")
+	b.BackgroundTransparency = 1
+	b.Text       = txt  or ""
+	b.TextColor3 = col  or C.txt
+	b.Font       = font or Enum.Font.Gotham
+	b.ZIndex     = zi   or 3
+	if ts then b.TextScaled = false b.TextSize = ts
+	else       b.TextScaled = true end
+	if p then b.Parent = p end
+	return b
+end
+
+local function corner(p, r)
+	Instance.new("UICorner", p).CornerRadius = UDim.new(0, r or 10)
+end
+
+local function stroke(p, col, th)
+	local s = Instance.new("UIStroke", p)
+	s.Color     = col or C.line
+	s.Thickness = th  or 1
+	return s
+end
+
+local function glowStroke(p, col, th)
+	local s = Instance.new("UIStroke", p)
+	s.Color        = col or C.blue
+	s.Thickness    = th  or 2
+	s.Transparency = 0.4
+	return s
+end
+
+local function addGradient(p, c1, c2, rot)
+	local g = Instance.new("UIGradient", p)
+	g.Color = ColorSequence.new{
+		ColorSequenceKeypoint.new(0, c1),
+		ColorSequenceKeypoint.new(1, c2),
+	}
+	g.Rotation = rot or 90
+	return g
+end
+
+local function line(p, y)
+	local d = mkFrame(p, C.line, 2)
+	d.Size     = UDim2.new(1, -24, 0, 1)
+	d.Position = UDim2.new(0, 12, 0, y)
+	d.BackgroundTransparency = 0.5
+	addGradient(d, C.line, Color3.fromRGB(50, 50, 80), 0)
+end
+
+local function secHdr(p, y, txt)
+	local bar = mkFrame(p, C.blue, 3)
+	bar.Size     = UDim2.new(0, 3, 0, 14)
+	bar.Position = UDim2.new(0, 12, 0, y + 2)
+	corner(bar, 2)
+	local barGlow = mkFrame(p, C.blue, 2)
+	barGlow.Size     = UDim2.new(0, 7, 0, 14)
+	barGlow.Position = UDim2.new(0, 10, 0, y + 2)
+	barGlow.BackgroundTransparency = 0.7
+	corner(barGlow, 4)
+	local l = mkLabel(p, txt, C.txtM, Enum.Font.GothamBold, Enum.TextXAlignment.Left, 3, 10)
+	l.Size     = UDim2.new(1, -30, 0, 18)
+	l.Position = UDim2.new(0, 22, 0, y)
+	return l
+end
+
+local function statRow(p, y, icon, lbl, valCol)
+	local row = mkFrame(p, C.card, 2)
+	row.Size     = UDim2.new(1, -24, 0, 36)
+	row.Position = UDim2.new(0, 12, 0, y)
+	corner(row, 10)
+	stroke(row, C.line, 0.5)
+	local icBg = mkFrame(row, Color3.fromRGB(25, 25, 40), 3)
+	icBg.Size     = UDim2.new(0, 30, 0, 30)
+	icBg.Position = UDim2.new(0, 3, 0.5, -15)
+	corner(icBg, 8)
+	local ic = mkLabel(icBg, icon, C.txt, Enum.Font.Gotham, Enum.TextXAlignment.Center, 4, 14)
+	ic.Size = UDim2.new(1, 0, 1, 0)
+	local nm = mkLabel(row, lbl, C.txtM, Enum.Font.Gotham, Enum.TextXAlignment.Left, 3, 11)
+	nm.Size     = UDim2.new(0.50, -36, 1, 0)
+	nm.Position = UDim2.new(0, 38, 0, 0)
+	local vl = mkLabel(row, "0", valCol or C.blue, Enum.Font.GothamBold, Enum.TextXAlignment.Right, 3, 14)
+	vl.Size     = UDim2.new(0.45, -10, 1, 0)
+	vl.Position = UDim2.new(0.55, 0, 0, 0)
+	return vl
+end
+
+local function actionBtn(p, y, txt, bg, txtC)
+	local w = mkFrame(p, bg or C.blue, 3)
+	w.Size     = UDim2.new(1, -24, 0, 40)
+	w.Position = UDim2.new(0, 12, 0, y)
+	corner(w, 10)
+	local sh = mkFrame(w, Color3.fromRGB(255, 255, 255), 4)
+	sh.Size                   = UDim2.new(1, 0, 0, 20)
+	sh.BackgroundTransparency = 0.92
+	corner(sh, 10)
+	local b = mkBtn(w, txt, txtC or C.txt, Enum.Font.GothamBold, 5)
+	b.Size       = UDim2.new(1, 0, 1, 0)
+	b.TextSize   = 12
+	b.TextScaled = false
+	return w, b
+end
+
+local function hoverBtn(w, b, nc, hc)
+	b.MouseEnter:Connect(function()
+		TweenService:Create(w, TweenInfo.new(0.15, Enum.EasingStyle.Quad), {BackgroundColor3=hc}):Play()
+	end)
+	b.MouseLeave:Connect(function()
+		TweenService:Create(w, TweenInfo.new(0.15, Enum.EasingStyle.Quad), {BackgroundColor3=nc}):Play()
+	end)
+	b.TouchTap:Connect(function()
+		TweenService:Create(w, TweenInfo.new(0.05), {BackgroundColor3=hc}):Play()
+		task.delay(0.15, function()
+			TweenService:Create(w, TweenInfo.new(0.15), {BackgroundColor3=nc}):Play()
+		end)
+	end)
+end
+
+local function stepperRow(p, y, lbl, minV, maxV, defV, unit)
+	local row = mkFrame(p, C.card, 2)
+	row.Size     = UDim2.new(1, -24, 0, 48)
+	row.Position = UDim2.new(0, 12, 0, y)
+	corner(row, 10)
+	stroke(row, C.line, 0.5)
+	local nm = mkLabel(row, lbl, C.txtM, Enum.Font.Gotham, Enum.TextXAlignment.Left, 3, 10)
+	nm.Size     = UDim2.new(0.5, 0, 0, 20)
+	nm.Position = UDim2.new(0, 12, 0, 4)
+	local curVal = defV
+	local valL = mkLabel(row, tostring(curVal) .. (unit or ""), C.txt, Enum.Font.GothamBold, Enum.TextXAlignment.Center, 3, 14)
+	valL.Size     = UDim2.new(0, 50, 0, 26)
+	valL.Position = UDim2.new(0.5, -25, 0, 18)
+	local minusW = mkFrame(row, C.blueD, 3)
+	minusW.Size     = UDim2.new(0, 30, 0, 26)
+	minusW.Position = UDim2.new(0.5, -25-36, 0, 18)
+	corner(minusW, 8)
+	local minusB = mkBtn(minusW, "−", C.txt, Enum.Font.GothamBold, 4, 16)
+	minusB.Size = UDim2.new(1, 0, 1, 0) minusB.TextScaled = false
+	local plusW = mkFrame(row, C.blueD, 3)
+	plusW.Size     = UDim2.new(0, 30, 0, 26)
+	plusW.Position = UDim2.new(0.5, 25+6, 0, 18)
+	corner(plusW, 8)
+	local plusB = mkBtn(plusW, "+", C.txt, Enum.Font.GothamBold, 4, 16)
+	plusB.Size = UDim2.new(1, 0, 1, 0) plusB.TextScaled = false
+	local function updateVal(v)
+		curVal    = math.clamp(v, minV, maxV)
+		valL.Text = tostring(curVal) .. (unit or "")
+	end
+	minusB.MouseButton1Click:Connect(function()
+		updateVal(curVal - 1)
+		TweenService:Create(minusW, TweenInfo.new(0.05), {BackgroundColor3=C.blue}):Play()
+		task.delay(0.1, function() TweenService:Create(minusW, TweenInfo.new(0.15), {BackgroundColor3=C.blueD}):Play() end)
+	end)
+	plusB.MouseButton1Click:Connect(function()
+		updateVal(curVal + 1)
+		TweenService:Create(plusW, TweenInfo.new(0.05), {BackgroundColor3=C.blue}):Play()
+		task.delay(0.1, function() TweenService:Create(plusW, TweenInfo.new(0.15), {BackgroundColor3=C.blueD}):Play() end)
+	end)
+	local function holdRepeat(btn, delta)
+		local holding = false
+		btn.MouseButton1Down:Connect(function()
+			holding = true
+			task.delay(0.4, function()
+				while holding do updateVal(curVal + delta) task.wait(0.07) end
+			end)
+		end)
+		btn.MouseButton1Up:Connect(function() holding = false end)
+		btn.MouseLeave:Connect(function() holding = false end)
+	end
+	holdRepeat(minusB, -1)
+	holdRepeat(plusB,   1)
+	hoverBtn(minusW, minusB, C.blueD, C.blue)
+	hoverBtn(plusW,  plusB,  C.blueD, C.blue)
+	return function() return curVal end
+end
+
+local function stepperRowFloat(p, y, lbl, minV, maxV, defV, step, unit)
+	local row = mkFrame(p, C.card, 2)
+	row.Size     = UDim2.new(1, -24, 0, 48)
+	row.Position = UDim2.new(0, 12, 0, y)
+	corner(row, 10)
+	stroke(row, C.line, 0.5)
+	local nm = mkLabel(row, lbl, C.txtM, Enum.Font.Gotham, Enum.TextXAlignment.Left, 3, 10)
+	nm.Size     = UDim2.new(0.5, 0, 0, 20)
+	nm.Position = UDim2.new(0, 12, 0, 4)
+	local curVal = defV
+	local valL = mkLabel(row, string.format("%.1f", curVal) .. (unit or ""), C.txt, Enum.Font.GothamBold, Enum.TextXAlignment.Center, 3, 13)
+	valL.Size     = UDim2.new(0, 56, 0, 26)
+	valL.Position = UDim2.new(0.5, -28, 0, 18)
+	local minusW = mkFrame(row, C.blueD, 3)
+	minusW.Size     = UDim2.new(0, 30, 0, 26)
+	minusW.Position = UDim2.new(0.5, -28-36, 0, 18)
+	corner(minusW, 8)
+	local minusB = mkBtn(minusW, "−", C.txt, Enum.Font.GothamBold, 4, 16)
+	minusB.Size = UDim2.new(1,0,1,0) minusB.TextScaled = false
+	local plusW = mkFrame(row, C.blueD, 3)
+	plusW.Size     = UDim2.new(0, 30, 0, 26)
+	plusW.Position = UDim2.new(0.5, 28+6, 0, 18)
+	corner(plusW, 8)
+	local plusB = mkBtn(plusW, "+", C.txt, Enum.Font.GothamBold, 4, 16)
+	plusB.Size = UDim2.new(1,0,1,0) plusB.TextScaled = false
+	local function updateVal(v)
+		curVal    = math.clamp(math.floor(v * 10 + 0.5) / 10, minV, maxV)
+		valL.Text = string.format("%.1f", curVal) .. (unit or "")
+	end
+	minusB.MouseButton1Click:Connect(function() updateVal(curVal - step) end)
+	plusB.MouseButton1Click:Connect(function()  updateVal(curVal + step) end)
+	hoverBtn(minusW, minusB, C.blueD, C.blue)
+	hoverBtn(plusW,  plusB,  C.blueD, C.blue)
+	return function() return curVal end
+end
+
+local function mkToggle(parent, y, lbl, accentCol, onCb)
+	local row = mkFrame(parent, C.card, 3)
+	row.Size     = UDim2.new(1, -24, 0, 40)
+	row.Position = UDim2.new(0, 12, 0, y)
+	corner(row, 10)
+	local bar = mkFrame(row, accentCol or C.blue, 4)
+	bar.Size = UDim2.new(0, 3, 0.55, 0) bar.Position = UDim2.new(0, 0, 0.225, 0) corner(bar, 2)
+	local barG = mkFrame(row, accentCol or C.blue, 3)
+	barG.Size = UDim2.new(0, 8, 0.55, 0) barG.Position = UDim2.new(0, -1, 0.225, 0)
+	barG.BackgroundTransparency = 0.75 corner(barG, 4)
+	local lb = mkLabel(row, lbl, C.txt, Enum.Font.GothamBold, Enum.TextXAlignment.Left, 4, 12)
+	lb.Size = UDim2.new(0.65, 0, 1, 0) lb.Position = UDim2.new(0, 14, 0, 0)
+	local trackBg = mkFrame(row, C.line, 4)
+	trackBg.Size = UDim2.new(0, 40, 0, 22) trackBg.Position = UDim2.new(1, -52, 0.5, -11)
+	corner(trackBg, 11)
+	local knob = mkFrame(trackBg, C.txt, 5)
+	knob.Size = UDim2.new(0, 16, 0, 16) knob.Position = UDim2.new(0, 3, 0.5, -8)
+	corner(knob, 8)
+	local knobGlow = mkFrame(trackBg, accentCol or C.blue, 4)
+	knobGlow.Size = UDim2.new(0, 22, 0, 22) knobGlow.Position = UDim2.new(1, -25, 0.5, -11)
+	knobGlow.BackgroundTransparency = 1
+	corner(knobGlow, 11)
+	local enabled = false
+	local btn = mkBtn(row, "", C.txt, Enum.Font.Gotham, 6)
+	btn.Size = UDim2.new(1,0,1,0)
+	local function setToggle(state)
+		enabled = state
+		local col = accentCol or C.blue
+		TweenService:Create(trackBg, TweenInfo.new(0.2, Enum.EasingStyle.Quad),
+			{BackgroundColor3 = enabled and col or C.line}):Play()
+		TweenService:Create(knob, TweenInfo.new(0.2, Enum.EasingStyle.Quad),
+			{Position = enabled and UDim2.new(1, -19, 0.5, -8) or UDim2.new(0, 3, 0.5, -8)}):Play()
+		TweenService:Create(knobGlow, TweenInfo.new(0.2),
+			{BackgroundTransparency = enabled and 0.6 or 1}):Play()
+		if onCb then onCb(enabled) end
+	end
+	btn.MouseButton1Click:Connect(function() setToggle(not enabled) end)
+	btn.MouseEnter:Connect(function()
+		TweenService:Create(row, TweenInfo.new(0.12), {BackgroundColor3 = C.cardHi}):Play()
+	end)
+	btn.MouseLeave:Connect(function()
+		TweenService:Create(row, TweenInfo.new(0.12), {BackgroundColor3 = C.card}):Play()
+	end)
+	return setToggle, function() return enabled end, row
+end
+
+-- ─── HELPER: Sub-tab builder (reusable) ───────────────────
+local function buildSubTabs(parentFrame, tabNames, tabColors)
+	-- returns: pages table, switchTab function
+	local tabBar = mkFrame(parentFrame, C.tabBg, 3)
+	tabBar.Size = UDim2.new(1, 0, 0, 30)
+	local tabLine = mkFrame(parentFrame, C.line, 3)
+	tabLine.Size     = UDim2.new(1, 0, 0, 1)
+	tabLine.Position = UDim2.new(0, 0, 0, 30)
+	tabLine.BackgroundTransparency = 0.5
+	local tabBtns = {}
+	local pages   = {}
+	local tw      = 1 / #tabNames
+	for i, name in ipairs(tabNames) do
+		local col = tabColors and tabColors[i] or C.blue
+		local tb = mkBtn(tabBar, name, C.txtD, Enum.Font.GothamBold, 4, 9)
+		tb.BackgroundTransparency = 0
+		tb.BackgroundColor3       = C.tabBg
+		tb.Size     = UDim2.new(tw, 0, 1, 0)
+		tb.Position = UDim2.new(tw * (i-1), 0, 0, 0)
+		tabBtns[i]  = tb
+		local ul = mkFrame(tb, col, 5)
+		ul.Name     = "UL"
+		ul.Size     = UDim2.new(0.6, 0, 0, 2)
+		ul.Position = UDim2.new(0.2, 0, 1, -2)
+		ul.Visible  = (i==1)
+		corner(ul, 1)
+		local pg = mkFrame(parentFrame, Color3.fromRGB(0,0,0), 2)
+		pg.BackgroundTransparency = 1
+		pg.Size             = UDim2.new(1, 0, 1, -31)
+		pg.Position         = UDim2.new(0, 0, 0, 31)
+		pg.Visible          = (i==1)
+		pg.ClipsDescendants = true
+		pages[i] = pg
+	end
+	local function switchTab(idx)
+		for i = 1, #tabNames do
+			local col = tabColors and tabColors[i] or C.blue
+			pages[i].Visible      = (i==idx)
+			tabBtns[i].TextColor3 = (i==idx) and C.txt or C.txtD
+			local ul = tabBtns[i]:FindFirstChild("UL")
+			if ul then ul.Visible = (i==idx) end
+			TweenService:Create(tabBtns[i], TweenInfo.new(0.15),
+				{BackgroundColor3=(i==idx) and Color3.fromRGB(18,18,28) or C.tabBg}):Play()
+		end
+	end
+	for i, tb in ipairs(tabBtns) do
+		tb.MouseButton1Click:Connect(function() switchTab(i) end)
+	end
+	return pages, switchTab
+end
+
+-- ============================================================
+-- SCREEN GUI
+-- ============================================================
+pcall(function()
+	if playerGui:FindFirstChild("PatStoreGUI") then playerGui.PatStoreGUI:Destroy() end
+	if game.CoreGui:FindFirstChild("PatStoreGUI") then game.CoreGui.PatStoreGUI:Destroy() end
+end)
+
+local sg = Instance.new("ScreenGui")
+sg.Name           = "PatStoreGUI"
+sg.ResetOnSpawn   = false
+sg.IgnoreGuiInset = true
+sg.DisplayOrder   = 10
+pcall(function() sg.Parent = game.CoreGui end)
+if sg.Parent ~= game.CoreGui then sg.Parent = playerGui end
+
+local PW, PH  = 580, 440
+local SIDEBAR = 120
+local CONTENT = PW - SIDEBAR
+
+local panel = mkFrame(sg, C.panel, 1)
+panel.Name     = "Panel"
+panel.Size     = UDim2.new(0, PW, 0, PH)
+panel.Position = UDim2.new(0.5, -PW/2, 0.5, -PH/2)
+corner(panel, 14)
+stroke(panel, Color3.fromRGB(35, 35, 55), 1.5)
+panel.BackgroundTransparency = 1
+panel.Size = UDim2.new(0, PW * 0.9, 0, PH * 0.9)
+task.defer(function()
+	TweenService:Create(panel, TweenInfo.new(0.35, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
+		BackgroundTransparency = 0,
+		Size     = UDim2.new(0, PW, 0, PH),
+		Position = UDim2.new(0.5, -PW/2, 0.5, -PH/2),
+	}):Play()
+end)
+
+do
+	local acc = mkFrame(panel, C.blue, 2)
+	acc.Size = UDim2.new(1, 0, 0, 3)
+	corner(acc, 14)
+	local ag = Instance.new("UIGradient", acc)
+	ag.Color = ColorSequence.new{
+		ColorSequenceKeypoint.new(0,    Color3.fromRGB(65,  120, 255)),
+		ColorSequenceKeypoint.new(0.25, Color3.fromRGB(140, 70,  255)),
+		ColorSequenceKeypoint.new(0.5,  Color3.fromRGB(255, 80,  160)),
+		ColorSequenceKeypoint.new(0.75, Color3.fromRGB(40,  210, 235)),
+		ColorSequenceKeypoint.new(1,    Color3.fromRGB(65,  120, 255)),
+	}
+	task.spawn(function()
+		local offset = 0
+		while panel and panel.Parent do
+			offset = (offset + 0.003) % 1
+			ag.Offset = Vector2.new(offset, 0)
+			task.wait(0.016)
+		end
+	end)
+end
+
+local titleBar = mkFrame(panel, C.bg, 3)
+titleBar.Size     = UDim2.new(1, 0, 0, 44)
+titleBar.Position = UDim2.new(0, 0, 0, 3)
+corner(titleBar, 12)
+
+do
+	local dragging  = false
+	local dragInput = nil
+	local dragStart = nil
+	local startPos  = nil
+	local function updateDrag(input)
+		local delta  = input.Position - dragStart
+		local newPos = UDim2.new(
+			startPos.X.Scale, startPos.X.Offset + delta.X,
+			startPos.Y.Scale, startPos.Y.Offset + delta.Y
+		)
+		TweenService:Create(panel, TweenInfo.new(0.05, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {Position=newPos}):Play()
+	end
+	titleBar.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1
+		or input.UserInputType == Enum.UserInputType.Touch then
+			dragging  = true
+			dragStart = input.Position
+			startPos  = panel.Position
+			input.Changed:Connect(function()
+				if input.UserInputState == Enum.UserInputState.End then dragging = false end
+			end)
+		end
+	end)
+	titleBar.InputChanged:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseMovement
+		or input.UserInputType == Enum.UserInputType.Touch then
+			dragInput = input
+		end
+	end)
+	UIS.InputChanged:Connect(function(input)
+		if input == dragInput and dragging then updateDrag(input) end
+	end)
+	local dot = mkFrame(titleBar, C.blue, 4)
+	dot.Size = UDim2.new(0, 10, 0, 10) dot.Position = UDim2.new(0, 14, 0.5, -5) corner(dot, 5)
+	local dotGlow = mkFrame(titleBar, C.blue, 3)
+	dotGlow.Size = UDim2.new(0, 20, 0, 20) dotGlow.Position = UDim2.new(0, 9, 0.5, -10)
+	dotGlow.BackgroundTransparency = 0.7 corner(dotGlow, 10)
+	task.spawn(function()
+		while dot and dot.Parent do
+			TweenService:Create(dotGlow, TweenInfo.new(1.5, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut),
+				{BackgroundTransparency = 0.5}):Play()
+			task.wait(1.5)
+			TweenService:Create(dotGlow, TweenInfo.new(1.5, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut),
+				{BackgroundTransparency = 0.85}):Play()
+			task.wait(1.5)
+		end
+	end)
+	local titleL = mkLabel(titleBar, "PatStore", C.txt, Enum.Font.GothamBold, Enum.TextXAlignment.Left, 4, 16)
+	titleL.Size = UDim2.new(0.3, 0, 1, 0) titleL.Position = UDim2.new(0, 32, 0, 0)
+	local verBadge = mkFrame(titleBar, Color3.fromRGB(20, 25, 40), 4)
+	verBadge.Size = UDim2.new(0, 52, 0, 20) verBadge.Position = UDim2.new(0, 100, 0.5, -10)
+	corner(verBadge, 6) stroke(verBadge, C.blue, 0.5)
+	local verL = mkLabel(verBadge, "v12.0", C.blue, Enum.Font.GothamBold, Enum.TextXAlignment.Center, 5, 10)
+	verL.Size = UDim2.new(1, 0, 1, 0)
+end
+
+local closeW = mkFrame(titleBar, Color3.fromRGB(20, 20, 32), 4)
+closeW.Size = UDim2.new(0, 28, 0, 28) closeW.Position = UDim2.new(1, -68, 0.5, -14)
+corner(closeW, 8)
+local closeB = mkBtn(closeW, "✕", C.txtM, Enum.Font.GothamBold, 5)
+closeB.Size = UDim2.new(1,0,1,0) closeB.TextSize = 12 closeB.TextScaled = false
+closeB.MouseButton1Click:Connect(function() panel.Visible = not panel.Visible end)
+closeB.MouseEnter:Connect(function()
+	TweenService:Create(closeW, TweenInfo.new(0.12), {BackgroundColor3=C.red}):Play()
+	closeB.TextColor3 = C.txt
+end)
+closeB.MouseLeave:Connect(function()
+	TweenService:Create(closeW, TweenInfo.new(0.12), {BackgroundColor3=Color3.fromRGB(20, 20, 32)}):Play()
+	closeB.TextColor3 = C.txtM
+end)
+
+local hideW = mkFrame(titleBar, Color3.fromRGB(20, 20, 32), 4)
+hideW.Size = UDim2.new(0, 28, 0, 28) hideW.Position = UDim2.new(1, -34, 0.5, -14)
+corner(hideW, 8)
+local hideB = mkBtn(hideW, "—", C.txtM, Enum.Font.GothamBold, 5)
+hideB.Size = UDim2.new(1,0,1,0) hideB.TextSize = 14 hideB.TextScaled = false
+
+local guiHidden     = false
+local savedPanelPos = nil
+
+local showBtn = Instance.new("TextButton", sg)
+showBtn.Size             = UDim2.new(0, 36, 0, 36)
+showBtn.Position         = UDim2.new(0, 8, 0, 8)
+showBtn.BackgroundColor3 = C.blue
+showBtn.BorderSizePixel  = 0
+showBtn.Text             = "▶"
+showBtn.TextColor3       = C.txt
+showBtn.Font             = Enum.Font.GothamBold
+showBtn.TextSize         = 13
+showBtn.TextScaled       = false
+showBtn.ZIndex           = 999
+showBtn.Visible          = false
+Instance.new("UICorner", showBtn).CornerRadius = UDim.new(0, 10)
+glowStroke(showBtn, C.blue, 2)
+
+hideB.MouseButton1Click:Connect(function()
+	guiHidden     = true
+	savedPanelPos = panel.Position
+	TweenService:Create(panel, TweenInfo.new(0.25, Enum.EasingStyle.Back, Enum.EasingDirection.In),
+		{Position=UDim2.new(0, -PW-10, 0, 8), BackgroundTransparency=0.3}):Play()
+	task.delay(0.25, function() panel.Visible=false showBtn.Visible=true end)
+end)
+showBtn.MouseButton1Click:Connect(function()
+	guiHidden     = false
+	panel.Visible = true
+	panel.Position= UDim2.new(0, -PW-10, 0, 8)
+	panel.BackgroundTransparency = 0.3
+	showBtn.Visible = false
+	TweenService:Create(panel, TweenInfo.new(0.3, Enum.EasingStyle.Back, Enum.EasingDirection.Out),
+		{Position = savedPanelPos or UDim2.new(0.5, -PW/2, 0.5, -PH/2), BackgroundTransparency=0}):Play()
+end)
+hideB.MouseEnter:Connect(function()
+	TweenService:Create(hideW, TweenInfo.new(0.12), {BackgroundColor3=C.blueD}):Play()
+	hideB.TextColor3 = C.txt
+end)
+hideB.MouseLeave:Connect(function()
+	TweenService:Create(hideW, TweenInfo.new(0.12), {BackgroundColor3=Color3.fromRGB(20, 20, 32)}):Play()
+	hideB.TextColor3 = C.txtM
+end)
+
+local body = mkFrame(panel, C.bg, 2)
+body.Size     = UDim2.new(1, 0, 1, -49)
+body.Position = UDim2.new(0, 0, 0, 49)
+corner(body, 12)
+
+local sidebar = mkFrame(body, C.panel, 3)
+sidebar.Size = UDim2.new(0, SIDEBAR, 1, 0)
+corner(sidebar, 12)
+
+local sideDiv = mkFrame(body, C.line, 3)
+sideDiv.Size     = UDim2.new(0, 1, 1, -16)
+sideDiv.Position = UDim2.new(0, SIDEBAR, 0, 8)
+sideDiv.BackgroundTransparency = 0.4
+
+local contentArea = mkFrame(body, Color3.fromRGB(0,0,0), 2)
+contentArea.BackgroundTransparency = 1
+contentArea.Size     = UDim2.new(1, -SIDEBAR-1, 1, 0)
+contentArea.Position = UDim2.new(0, SIDEBAR+1, 0, 0)
+
+local MENUS    = {"🌾 FARM","⚡ FULLY","🗺 TELEPORT","🛡 FEATURE","👁 ESP","⚔️ COMBAT","⭐ CREDIT"}
+local menuBtns = {}
+local menuPages= {}
+
+for i, name in ipairs(MENUS) do
+	local mb = mkFrame(sidebar, C.bg, 4)
+	mb.Size     = UDim2.new(1, -14, 0, 38)
+	mb.Position = UDim2.new(0, 7, 0, 8+(i-1)*42)
+	corner(mb, 10)
+	local icon  = name:match("^(.-)%s") or name:sub(1,2)
+	local label = name:match("%s(.+)$") or name
+	local mbIcon = mkLabel(mb, icon, C.txtM, Enum.Font.Gotham, Enum.TextXAlignment.Center, 5, 14)
+	mbIcon.Size = UDim2.new(1, 0, 0, 20) mbIcon.Position = UDim2.new(0, 0, 0, 3)
+	local mbLabel = mkLabel(mb, label, C.txtD, Enum.Font.GothamBold, Enum.TextXAlignment.Center, 5, 7)
+	mbLabel.Size = UDim2.new(1, 0, 0, 12) mbLabel.Position = UDim2.new(0, 0, 0, 22)
+	local ind = mkFrame(mb, C.blue, 6)
+	ind.Size = UDim2.new(0, 3, 0.55, 0) ind.Position = UDim2.new(0, 0, 0.225, 0)
+	corner(ind, 2) ind.Visible = (i == 1)
+	local indGlow = mkFrame(mb, C.blue, 5)
+	indGlow.Size = UDim2.new(0, 8, 0.55, 0) indGlow.Position = UDim2.new(0, -1, 0.225, 0)
+	indGlow.BackgroundTransparency = 0.65 corner(indGlow, 4) indGlow.Visible = (i == 1)
+	local clickBtn = mkBtn(mb, "", C.txt, Enum.Font.Gotham, 7)
+	clickBtn.Size = UDim2.new(1, 0, 1, 0)
+	menuBtns[i] = {frame=mb, icon=mbIcon, label=mbLabel, ind=ind, indGlow=indGlow, btn=clickBtn}
+	local mp = mkFrame(contentArea, Color3.fromRGB(0,0,0), 2)
+	mp.BackgroundTransparency = 1
+	mp.Size             = UDim2.new(1, 0, 1, 0)
+	mp.Visible          = (i == 1)
+	mp.ClipsDescendants = true
+	menuPages[i] = mp
+end
+
+local function switchMenu(idx)
+	for i = 1, #MENUS do
+		local mb     = menuBtns[i]
+		local active = (i == idx)
+		mb.ind.Visible      = active
+		mb.indGlow.Visible  = active
+		mb.icon.TextColor3  = active and C.blue or C.txtM
+		mb.label.TextColor3 = active and C.txt  or C.txtD
+		TweenService:Create(mb.frame, TweenInfo.new(0.15, Enum.EasingStyle.Quad),
+			{BackgroundColor3 = active and Color3.fromRGB(18, 18, 30) or C.bg}):Play()
+		menuPages[i].Visible = active
+	end
+end
+for i, mb in ipairs(menuBtns) do
+	mb.btn.MouseButton1Click:Connect(function() switchMenu(i) end)
+	mb.btn.MouseEnter:Connect(function()
+		if not mb.ind.Visible then
+			TweenService:Create(mb.frame, TweenInfo.new(0.12), {BackgroundColor3 = Color3.fromRGB(15, 15, 25)}):Play()
+		end
+	end)
+	mb.btn.MouseLeave:Connect(function()
+		if not mb.ind.Visible then
+			TweenService:Create(mb.frame, TweenInfo.new(0.12), {BackgroundColor3 = C.bg}):Play()
+		end
+	end)
+end
+
+-- ============================================================
+-- FARM PAGE (1) — Sub-tabs: MASAK | JUAL | BELI | STATS
+-- ============================================================
+do
+	local farmPage = menuPages[1]
+	local subPages, _ = buildSubTabs(farmPage,
+		{"MASAK","JUAL","BELI","STATS"},
+		{C.blue, C.green, C.cyan, C.purple}
+	)
+
+	-- ── MASAK ──
+	do
+		local pg = subPages[1]
+		local sc = Instance.new("ScrollingFrame")
+		sc.Size = UDim2.new(1,0,1,0) sc.CanvasSize = UDim2.new(0,0,0,360)
+		sc.BackgroundTransparency = 1 sc.BorderSizePixel = 0
+		sc.ScrollBarThickness = 3 sc.ScrollBarImageColor3 = C.blue
+		sc.Parent = pg
+		local statusCard = mkFrame(sc, Color3.fromRGB(12, 14, 24), 3)
+		statusCard.Size = UDim2.new(1,-24,0,30) statusCard.Position = UDim2.new(0,12,0,8)
+		corner(statusCard, 10) local ss = stroke(statusCard, C.blue, 1) ss.Transparency = 0.5
+		lblStatus = mkLabel(statusCard, "⚡ Siap digunakan", C.cyan, Enum.Font.GothamBold, Enum.TextXAlignment.Center, 4, 11)
+		lblStatus.Size = UDim2.new(1,-8,1,0) lblStatus.Position = UDim2.new(0,4,0,0)
+		line(sc, 44)
+		secHdr(sc, 50, "BAHAN TERSEDIA")
+		local vW  = statRow(sc,  70, "💧", "Water",     Color3.fromRGB(100,200,255))
+		local vSu = statRow(sc, 112, "🧂", "Sugar Bag", Color3.fromRGB(255,220,100))
+		local vGe = statRow(sc, 154, "🟡", "Gelatin",   Color3.fromRGB(255,190,60))
+		line(sc, 196)
+		secHdr(sc, 202, "HASIL MASAK")
+		local msCard = mkFrame(sc, Color3.fromRGB(12,14,24), 3)
+		msCard.Size = UDim2.new(1,-24,0,52) msCard.Position = UDim2.new(0,12,0,220)
+		corner(msCard, 12) glowStroke(msCard, C.blue, 2)
+		local msBig = mkLabel(msCard, "0", C.blue, Enum.Font.GothamBold, Enum.TextXAlignment.Center, 4, 30)
+		msBig.Size = UDim2.new(0.35, 0, 1, 0)
+		local msDiv = mkFrame(msCard, C.line, 4)
+		msDiv.Size = UDim2.new(0,1,0.6,0) msDiv.Position = UDim2.new(0.35,0,0.2,0)
+		local msSubL = mkLabel(msCard, "Marshmallow\ndibuat", C.txtM, Enum.Font.Gotham, Enum.TextXAlignment.Left, 4, 10)
+		msSubL.Size = UDim2.new(0.62,-12,1,0) msSubL.Position = UDim2.new(0.37,10,0,0) msSubL.TextWrapped = true
+		line(sc, 280)
+		local startW, startB = actionBtn(sc, 288, "▶  Start Auto Masak", C.blueD, C.txt)
+		local stopW,  stopB  = actionBtn(sc, 288, "■  Stop Auto Masak",  C.red,   C.txt)
+		stopW.Visible = false
+		local function setRunUI(r) startW.Visible = not r stopW.Visible = r end
+		startB.MouseButton1Click:Connect(function()
+			if isBusy then return end
+			if not hasAllIngredients() then setStatus("❌ Bahan tidak lengkap!", C.red) return end
+			isRunning = true setRunUI(true) setStatus("⚡ Berjalan...", C.green)
+			task.spawn(autoLoop)
+		end)
+		stopB.MouseButton1Click:Connect(function()
+			isRunning = false setRunUI(false) setStatus("⏸ Dihentikan", C.orange)
+		end)
+		hoverBtn(startW, startB, C.blueD, Color3.fromRGB(55,100,230))
+		hoverBtn(stopW,  stopB,  C.red,   Color3.fromRGB(240,60,60))
+		RunService.Heartbeat:Connect(function()
+			pcall(function()
+				vW.Text    = tostring(countItem(CFG.ITEM_WATER))
+				vSu.Text   = tostring(countItem(CFG.ITEM_SUGAR))
+				vGe.Text   = tostring(countItem(CFG.ITEM_GEL))
+				msBig.Text = tostring(totalMS())
+			end)
+		end)
+	end
+
+	-- ── JUAL ──
+	local jualBusy2 = false
+	do
+		local pg = subPages[2]
+		local sc = Instance.new("ScrollingFrame")
+		sc.Size = UDim2.new(1,0,1,0) sc.CanvasSize = UDim2.new(0,0,0,320)
+		sc.BackgroundTransparency = 1 sc.BorderSizePixel = 0
+		sc.ScrollBarThickness = 3 sc.ScrollBarImageColor3 = C.green
+		sc.Parent = pg
+		secHdr(sc, 8, "AUTO JUAL MARSHMALLOW")
+		local jualInfo = mkFrame(sc, Color3.fromRGB(12,14,24), 3)
+		jualInfo.Size = UDim2.new(1,-24,0,30) jualInfo.Position = UDim2.new(0,12,0,28)
+		corner(jualInfo, 10) stroke(jualInfo, C.line, 0.5)
+		local jInfoL = mkLabel(jualInfo, "ℹ️ Dekati NPC Jual lalu tekan tombol.", C.txtM, Enum.Font.Gotham, Enum.TextXAlignment.Left, 4, 10)
+		jInfoL.Size = UDim2.new(1,-16,1,0) jInfoL.Position = UDim2.new(0,8,0,0)
+		line(sc, 64)
+		secHdr(sc, 70, "STATISTIK")
+		local vSold  = statRow(sc,  90, "💰", "Total Terjual",   Color3.fromRGB(52,210,110))
+		local vMSInv = statRow(sc, 132, "🍬", "MS di Inventory", Color3.fromRGB(100,180,255))
+		line(sc, 174)
+		local jualStatBox = mkFrame(sc, Color3.fromRGB(12,14,24), 3)
+		jualStatBox.Size = UDim2.new(1,-24,0,28) jualStatBox.Position = UDim2.new(0,12,0,182)
+		corner(jualStatBox, 8) stroke(jualStatBox, C.line, 0.5)
+		local jualStatL = mkLabel(jualStatBox, "", C.txtM, Enum.Font.Gotham, Enum.TextXAlignment.Center, 4, 10)
+		jualStatL.Size = UDim2.new(1,-8,1,0) jualStatL.Position = UDim2.new(0,4,0,0)
+		line(sc, 216)
+		local jualBtnW, jualBtnB = actionBtn(sc, 224, "💰  Jual Semua Marshmallow", C.greenD, C.txt)
+		local function setJualStatus(msg, col)
+			jualStatL.Text = msg jualStatL.TextColor3 = col or C.txtM setStatus(msg, col)
+		end
+		jualBtnB.MouseButton1Click:Connect(function()
+			if jualBusy2 then return end
+			jualBusy2 = true
+			jualBtnW.BackgroundColor3 = Color3.fromRGB(18, 88, 42)
+			jualBtnB.Text = "⏳ Menjual..."
+			task.spawn(function()
+				doAutoSell(setJualStatus)
+				jualBtnW.BackgroundColor3 = C.greenD
+				jualBtnB.Text = "💰  Jual Semua Marshmallow"
+				jualBusy2 = false
+			end)
+		end)
+		hoverBtn(jualBtnW, jualBtnB, C.greenD, Color3.fromRGB(35,170,90))
+		RunService.Heartbeat:Connect(function()
+			pcall(function()
+				vSold.Text  = tostring(totalSold)
+				vMSInv.Text = tostring(countAllMS())
+			end)
+		end)
+	end
+
+	-- ── BELI ──
+	do
+		local pg = subPages[3]
+		local sc = Instance.new("ScrollingFrame")
+		sc.Size = UDim2.new(1,0,1,0) sc.CanvasSize = UDim2.new(0,0,0,450)
+		sc.BackgroundTransparency = 1 sc.BorderSizePixel = 0
+		sc.ScrollBarThickness = 3 sc.ScrollBarImageColor3 = C.cyan
+		sc.Parent = pg
+		secHdr(sc, 8, "AUTO BELI BAHAN")
+		local beliInfo = mkFrame(sc, Color3.fromRGB(12,14,24), 3)
+		beliInfo.Size = UDim2.new(1,-24,0,30) beliInfo.Position = UDim2.new(0,12,0,28)
+		corner(beliInfo, 10) stroke(beliInfo, C.line, 0.5)
+		local bInfoL = mkLabel(beliInfo, "ℹ️ Atur jumlah beli lalu tekan Start.", C.txtM, Enum.Font.Gotham, Enum.TextXAlignment.Left, 4, 10)
+		bInfoL.Size = UDim2.new(1,-16,1,0) bInfoL.Position = UDim2.new(0,8,0,0)
+		line(sc, 64)
+		secHdr(sc, 70, "JUMLAH BELI")
+		local getQtyAll = stepperRow(sc, 88, "Jumlah semua bahan", 1, 99, 5, "x")
+		local itemData = {
+			{icon="🟡", name="Gelatin",         price="$70"},
+			{icon="🧂", name="Sugar Block Bag", price="$100"},
+			{icon="💧", name="Water",           price="$20"},
+		}
+		for i, item in ipairs(itemData) do
+			local ry  = 142 + (i-1)*40
+			local row = mkFrame(sc, C.card, 3)
+			row.Size = UDim2.new(1,-24,0,34) row.Position = UDim2.new(0,12,0,ry)
+			corner(row, 10) stroke(row, C.line, 0.5)
+			local icL = mkLabel(row, item.icon, C.txt, Enum.Font.Gotham, Enum.TextXAlignment.Center, 4, 14)
+			icL.Size = UDim2.new(0,28,1,0)
+			local nmL = mkLabel(row, item.name, C.txt, Enum.Font.Gotham, Enum.TextXAlignment.Left, 4, 11)
+			nmL.Size = UDim2.new(0.55,-28,1,0) nmL.Position = UDim2.new(0,32,0,0)
+			local prL = mkLabel(row, item.price, C.txtD, Enum.Font.GothamBold, Enum.TextXAlignment.Right, 4, 11)
+			prL.Size = UDim2.new(0.4,-10,1,0) prL.Position = UDim2.new(0.6,0,0,0)
+		end
+		line(sc, 266)
+		local vBuy2 = statRow(sc, 274, "🛒", "Total Dibeli", Color3.fromRGB(100,180,255))
+		line(sc, 316)
+		local beliStatBox = mkFrame(sc, Color3.fromRGB(12,14,24), 3)
+		beliStatBox.Size = UDim2.new(1,-24,0,28) beliStatBox.Position = UDim2.new(0,12,0,324)
+		corner(beliStatBox, 8) stroke(beliStatBox, C.line, 0.5)
+		local beliStatL = mkLabel(beliStatBox, "Atur jumlah lalu tekan Start", C.txtM, Enum.Font.Gotham, Enum.TextXAlignment.Center, 4, 10)
+		beliStatL.Size = UDim2.new(1,-8,1,0) beliStatL.Position = UDim2.new(0,4,0,0)
+		line(sc, 358)
+		local beliBtnW, beliBtnB = actionBtn(sc, 366, "🛒  Start Auto Beli", C.blueD, C.txt)
+		local function setBeliStatus(msg, col)
+			beliStatL.Text = msg beliStatL.TextColor3 = col or C.txtM setStatus(msg, col)
+		end
+		beliBtnB.MouseButton1Click:Connect(function()
+			if buyBusy then return end
+			buyBusy = true
+			local qty = getQtyAll()
+			beliBtnW.BackgroundColor3 = Color3.fromRGB(30,50,140)
+			beliBtnB.Text = "⏳ Membeli..."
+			task.spawn(function()
+				doAutoBuy(setBeliStatus, qty)
+				beliBtnW.BackgroundColor3 = C.blueD
+				beliBtnB.Text = "🛒  Start Auto Beli"
+				buyBusy = false
+			end)
+		end)
+		hoverBtn(beliBtnW, beliBtnB, C.blueD, Color3.fromRGB(55,100,220))
+		RunService.Heartbeat:Connect(function()
+			pcall(function() vBuy2.Text = tostring(totalBuy) end)
+		end)
+	end
+
+	-- ── STATS ──
+	do
+		local pg = subPages[4]
+		local sData = {
+			{icon="🍬",lbl="Total MS Dibuat",  col=Color3.fromRGB(100,190,255)},
+			{icon="🔹",lbl="Small MS",          col=Color3.fromRGB(130,205,255)},
+			{icon="🔷",lbl="Medium MS",         col=Color3.fromRGB(80,160,255)},
+			{icon="🔵",lbl="Large MS",          col=Color3.fromRGB(55,115,220)},
+			{icon="💰",lbl="Total MS Terjual",  col=Color3.fromRGB(52,210,110)},
+			{icon="🛒",lbl="Total Beli Bahan",  col=Color3.fromRGB(100,180,255)},
+			{icon="📡",lbl="Ping",              col=Color3.fromRGB(40,210,235)},
+			{icon="🖥",lbl="FPS",               col=Color3.fromRGB(140,70,255)},
+		}
+		local sVals = {}
+		for i, s in ipairs(sData) do
+			local y = 4 + (i-1)*38
+			sVals[i] = statRow(pg, y, s.icon, s.lbl, s.col)
+			if i < #sData then line(pg, y+36) end
+		end
+		local fpsSmooth = 60
+		RunService.RenderStepped:Connect(function(dt)
+			if dt > 0 then fpsSmooth = fpsSmooth * 0.9 + (1/dt) * 0.1 end
+		end)
+		local ping = 0
+		local lastUpdate2 = tick()
+		RunService.Heartbeat:Connect(function()
+			local now = tick()
+			if now - lastUpdate2 < 0.5 then return end
+			lastUpdate2 = now
+			pcall(function()
+				if sVals[1] then sVals[1].Text = tostring(totalMS())                      end
+				if sVals[2] then sVals[2].Text = tostring(stats.small)                    end
+				if sVals[3] then sVals[3].Text = tostring(stats.medium)                   end
+				if sVals[4] then sVals[4].Text = tostring(stats.large)                    end
+				if sVals[5] then sVals[5].Text = tostring(totalSold)                      end
+				if sVals[6] then sVals[6].Text = tostring(totalBuy)                       end
+				if sVals[7] then sVals[7].Text = tostring(ping) .. " ms"                  end
+				if sVals[8] then sVals[8].Text = tostring(math.floor(fpsSmooth)) .. " fps" end
+			end)
+			pcall(function()
+				local ps = game:GetService("Stats").Network.ServerStatsItem["Data Ping"]:GetValueString()
+				ping = tonumber(ps:match("%d+")) or ping
+			end)
+		end)
+	end
+end
+
+-- ============================================================
+-- FULLY PAGE (2) — Sub-tabs: MOTOR | NO MOTOR
+-- ============================================================
+do
+	local fullyPage = menuPages[2]
+	local subPages, _ = buildSubTabs(fullyPage,
+		{"🏍 MOTOR","🚶 NO MOTOR"},
+		{C.blue, C.cyan}
+	)
+
+	-- ── FULLY MOTOR ──
+	do
+		local pg = subPages[1]
+		local sc = Instance.new("ScrollingFrame")
+		sc.Size = UDim2.new(1,0,1,0) sc.CanvasSize = UDim2.new(0,0,0,540)
+		sc.BackgroundTransparency = 1 sc.BorderSizePixel = 0
+		sc.ScrollBarThickness = 3 sc.ScrollBarImageColor3 = C.blue
+		sc.Parent = pg
+		secHdr(sc, 8, "AUTO FULLY — MOTOR (AFK LOOP)")
+		local fi = mkFrame(sc, Color3.fromRGB(10,14,26), 3)
+		fi.Size = UDim2.new(1,-24,0,50) fi.Position = UDim2.new(0,12,0,28)
+		corner(fi, 10) stroke(fi, C.blue, 0.8)
+		local fiL = mkLabel(fi, "Loop: Beli bahan → Masak di Apart → Jual → Ulangi", C.txtM, Enum.Font.Gotham, Enum.TextXAlignment.Left, 4, 9)
+		fiL.Size = UDim2.new(1,-14,0.5,0) fiL.Position = UDim2.new(0,10,0,4) fiL.TextWrapped = true
+		local fiL2 = mkLabel(fi, "⚠️ Perlu naik motor/kendaraan!", C.orange, Enum.Font.GothamBold, Enum.TextXAlignment.Left, 4, 9)
+		fiL2.Size = UDim2.new(1,-14,0.5,0) fiL2.Position = UDim2.new(0,10,0.5,0)
+		line(sc, 84)
+		secHdr(sc, 90, "SIMPAN KOORDINAT APART")
+		local coordCard = mkFrame(sc, C.card, 3)
+		coordCard.Size = UDim2.new(1,-24,0,38) coordCard.Position = UDim2.new(0,12,0,108)
+		corner(coordCard, 10) stroke(coordCard, C.line, 0.5)
+		local coordL = mkLabel(coordCard, "Belum disimpan", C.txtD, Enum.Font.Gotham, Enum.TextXAlignment.Center, 4, 10)
+		coordL.Size = UDim2.new(0.72,0,1,0) coordL.Position = UDim2.new(0,10,0,0)
+		local savePosW = mkFrame(sc, C.purple, 4)
+		savePosW.Size = UDim2.new(0.24,-4,0,38) savePosW.Position = UDim2.new(0.76,0,0,108)
+		corner(savePosW, 10)
+		local savePosB = mkBtn(savePosW, "📍 Save", C.txt, Enum.Font.GothamBold, 5, 11)
+		savePosB.Size = UDim2.new(1,0,1,0) savePosB.TextScaled = false
+		savePosB.MouseButton1Click:Connect(function()
+			local ch = player.Character
+			local root = ch and ch:FindFirstChild("HumanoidRootPart")
+			if root then
+				fullySavedPos = root.Position
+				local p = root.Position
+				coordL.Text = string.format("%.1f, %.1f, %.1f", p.X, p.Y, p.Z)
+				coordL.TextColor3 = C.green
+				TweenService:Create(savePosW, TweenInfo.new(0.12), {BackgroundColor3=C.green}):Play()
+				task.delay(0.4, function() TweenService:Create(savePosW, TweenInfo.new(0.15), {BackgroundColor3=C.purple}):Play() end)
+			end
+		end)
+		hoverBtn(savePosW, savePosB, C.purple, C.purpleD)
+		line(sc, 152)
+		secHdr(sc, 158, "SETTING")
+		local getFullyTarget = stepperRow(sc, 176, "Target MS per loop", 1, 99, 5, "x")
+		line(sc, 230)
+		secHdr(sc, 236, "STATUS")
+		local fullyStatusCard = mkFrame(sc, Color3.fromRGB(12,14,24), 3)
+		fullyStatusCard.Size = UDim2.new(1,-24,0,30) fullyStatusCard.Position = UDim2.new(0,12,0,254)
+		corner(fullyStatusCard, 10) stroke(fullyStatusCard, C.line, 0.5)
+		local fullyStatL = mkLabel(fullyStatusCard, "Belum dimulai", C.txtM, Enum.Font.Gotham, Enum.TextXAlignment.Center, 4, 10)
+		fullyStatL.Size = UDim2.new(1,-8,1,0) fullyStatL.Position = UDim2.new(0,4,0,0)
+		local function setFullyStatus(msg, col)
+			fullyStatL.Text = msg fullyStatL.TextColor3 = col or C.txtM setStatus(msg, col)
+		end
+		local vFullyMS = statRow(sc, 292, "🍬", "Total MS Dibuat", Color3.fromRGB(100,190,255))
+		line(sc, 334)
+		local fullyStartW, fullyStartB = actionBtn(sc, 342, "⚡  Start Auto Fully (Motor)", C.blueD, C.txt)
+		local fullyStopW,  fullyStopB  = actionBtn(sc, 342, "■  Stop Auto Fully", C.red, C.txt)
+		fullyStopW.Visible = false
+		local function setFullyUI(r)
+			fullyStartW.Visible = not r fullyStopW.Visible = r
+		end
+		fullyStartB.MouseButton1Click:Connect(function()
+			if fullyRunning then return end
+			if not fullySavedPos then setFullyStatus("❌ Simpan koordinat Apart dulu!", C.red) return end
+			fullyTarget = getFullyTarget()
+			setFullyUI(true) setFullyStatus("⚡ Auto Fully berjalan...", C.blue)
+			task.spawn(function()
+				doAutoFully(setFullyStatus)
+				setFullyUI(false)
+				if not fullyRunning then setFullyStatus("✅ Dihentikan", C.green) end
+			end)
+		end)
+		fullyStopB.MouseButton1Click:Connect(function()
+			fullyRunning = false isRunning = false
+			setFullyUI(false) setFullyStatus("⏸ Dihentikan", C.orange)
+		end)
+		hoverBtn(fullyStartW, fullyStartB, C.blueD, Color3.fromRGB(55,100,230))
+		hoverBtn(fullyStopW,  fullyStopB,  C.red,   Color3.fromRGB(240,60,60))
+		RunService.Heartbeat:Connect(function()
+			pcall(function() vFullyMS.Text = tostring(totalMS()) end)
+		end)
+	end
+
+	-- ── FULLY NO MOTOR ──
+	do
+		local pg = subPages[2]
+		local sc = Instance.new("ScrollingFrame")
+		sc.Size = UDim2.new(1,0,1,0) sc.CanvasSize = UDim2.new(0,0,0,580)
+		sc.BackgroundTransparency = 1 sc.BorderSizePixel = 0
+		sc.ScrollBarThickness = 3 sc.ScrollBarImageColor3 = C.cyan
+		sc.Parent = pg
+		secHdr(sc, 8, "AUTO FULLY — NO MOTOR (UNDERGROUND)")
+		local fi = mkFrame(sc, Color3.fromRGB(8,16,24), 3)
+		fi.Size = UDim2.new(1,-24,0,68) fi.Position = UDim2.new(0,12,0,28)
+		corner(fi, 10) stroke(fi, C.cyan, 0.8)
+		local fiL1 = mkLabel(fi, "✅ Tidak perlu motor/kendaraan!", C.cyan, Enum.Font.GothamBold, Enum.TextXAlignment.Left, 4, 10)
+		fiL1.Size = UDim2.new(1,-14,0,20) fiL1.Position = UDim2.new(0,10,0,4)
+		local fiL2 = mkLabel(fi, "Flow: Underground ON → TP NPC → Beli → TP Apart → Masak → TP NPC → Jual → Loop", C.txtM, Enum.Font.Gotham, Enum.TextXAlignment.Left, 4, 9)
+		fiL2.Size = UDim2.new(1,-14,0,30) fiL2.Position = UDim2.new(0,10,0,24) fiL2.TextWrapped = true
+		local fiL3 = mkLabel(fi, "⚡ Underground otomatis ON/OFF di setiap titik", C.blue, Enum.Font.GothamBold, Enum.TextXAlignment.Left, 4, 9)
+		fiL3.Size = UDim2.new(1,-14,0,16) fiL3.Position = UDim2.new(0,10,0,52)
+		line(sc, 102)
+		secHdr(sc, 108, "SIMPAN KOORDINAT APART (BAWAH KOMPOR)")
+		local coordCard2 = mkFrame(sc, C.card, 3)
+		coordCard2.Size = UDim2.new(1,-24,0,38) coordCard2.Position = UDim2.new(0,12,0,126)
+		corner(coordCard2, 10) stroke(coordCard2, C.line, 0.5)
+		local coordL2 = mkLabel(coordCard2, "Belum disimpan", C.txtD, Enum.Font.Gotham, Enum.TextXAlignment.Center, 4, 10)
+		coordL2.Size = UDim2.new(0.72,0,1,0) coordL2.Position = UDim2.new(0,10,0,0)
+		local savePosW2 = mkFrame(sc, C.cyan, 4)
+		savePosW2.Size = UDim2.new(0.24,-4,0,38) savePosW2.Position = UDim2.new(0.76,0,0,126)
+		corner(savePosW2, 10)
+		local savePosB2 = mkBtn(savePosW2, "📍 Save", Color3.fromRGB(8,20,30), Enum.Font.GothamBold, 5, 11)
+		savePosB2.Size = UDim2.new(1,0,1,0) savePosB2.TextScaled = false
+		savePosB2.MouseButton1Click:Connect(function()
+			local ch = player.Character
+			local root = ch and ch:FindFirstChild("HumanoidRootPart")
+			if root then
+				fullyNMSavedPos = root.Position
+				local p = root.Position
+				coordL2.Text = string.format("%.1f, %.1f, %.1f", p.X, p.Y, p.Z)
+				coordL2.TextColor3 = C.green
+				TweenService:Create(savePosW2, TweenInfo.new(0.12), {BackgroundColor3=C.green}):Play()
+				task.delay(0.4, function() TweenService:Create(savePosW2, TweenInfo.new(0.15), {BackgroundColor3=C.cyan}):Play() end)
+			end
+		end)
+		hoverBtn(savePosW2, savePosB2, C.cyan, C.cyanD)
+		local infoTip = mkFrame(sc, Color3.fromRGB(10,12,20), 3)
+		infoTip.Size = UDim2.new(1,-24,0,24) infoTip.Position = UDim2.new(0,12,0,170)
+		corner(infoTip, 8)
+		local iTL = mkLabel(infoTip, "💡 Tips: save koordinat bawah kompor di apart kamu", C.txtD, Enum.Font.Gotham, Enum.TextXAlignment.Center, 4, 9)
+		iTL.Size = UDim2.new(1,-8,1,0)
+		line(sc, 200)
+		secHdr(sc, 206, "SETTING")
+		local getFullyNMTarget = stepperRow(sc, 224, "Target MS per loop", 1, 99, 5, "x")
+		line(sc, 278)
+		secHdr(sc, 284, "STATUS")
+		local nmStatusCard = mkFrame(sc, Color3.fromRGB(12,14,24), 3)
+		nmStatusCard.Size = UDim2.new(1,-24,0,30) nmStatusCard.Position = UDim2.new(0,12,0,302)
+		corner(nmStatusCard, 10) stroke(nmStatusCard, C.cyan, 0.5)
+		local nmStatL = mkLabel(nmStatusCard, "Belum dimulai", C.txtM, Enum.Font.Gotham, Enum.TextXAlignment.Center, 4, 10)
+		nmStatL.Size = UDim2.new(1,-8,1,0) nmStatL.Position = UDim2.new(0,4,0,0)
+		local function setNMStatus(msg, col)
+			nmStatL.Text = msg nmStatL.TextColor3 = col or C.txtM setStatus(msg, col)
+		end
+		local vNMMS = statRow(sc, 340, "🍬", "Total MS Dibuat", Color3.fromRGB(100,190,255))
+		line(sc, 382)
+		local ugIndicCard = mkFrame(sc, Color3.fromRGB(10,12,22), 3)
+		ugIndicCard.Size = UDim2.new(1,-24,0,24) ugIndicCard.Position = UDim2.new(0,12,0,390)
+		corner(ugIndicCard, 8) stroke(ugIndicCard, C.cyan, 0.5)
+		local ugIndicL = mkLabel(ugIndicCard, "🕳️ Underground: OFF", C.txtD, Enum.Font.Gotham, Enum.TextXAlignment.Center, 4, 10)
+		ugIndicL.Size = UDim2.new(1,-8,1,0)
+		RunService.Heartbeat:Connect(function()
+			pcall(function()
+				ugIndicL.Text = isUnderground and "🕳️ Underground: ON" or "🕳️ Underground: OFF"
+				ugIndicL.TextColor3 = isUnderground and C.cyan or C.txtD
+			end)
+		end)
+		line(sc, 420)
+		local nmStartW, nmStartB = actionBtn(sc, 428, "🚶  Start Fully No Motor", C.cyanD, C.txt)
+		local nmStopW,  nmStopB  = actionBtn(sc, 428, "■  Stop Fully No Motor",  C.red,   C.txt)
+		nmStopW.Visible = false
+		local function setNMUI(r)
+			nmStartW.Visible = not r nmStopW.Visible = r
+		end
+		nmStartB.MouseButton1Click:Connect(function()
+			if fullyNMRunning then return end
+			if not fullyNMSavedPos then setNMStatus("❌ Simpan koordinat Apart dulu!", C.red) return end
+			fullyNMTarget = getFullyNMTarget()
+			setNMUI(true) setNMStatus("🚶 Fully No Motor berjalan...", C.cyan)
+			task.spawn(function()
+				doAutoFullyNoMotor(setNMStatus)
+				setNMUI(false)
+				if not fullyNMRunning then setNMStatus("✅ Dihentikan", C.green) end
+			end)
+		end)
+		nmStopB.MouseButton1Click:Connect(function()
+			fullyNMRunning = false isRunning = false
+			setNMUI(false) setNMStatus("⏸ Dihentikan", C.orange)
+			if isUnderground then disableUnderground() end
+		end)
+		hoverBtn(nmStartW, nmStartB, C.cyanD, Color3.fromRGB(25,180,200))
+		hoverBtn(nmStopW,  nmStopB,  C.red,   Color3.fromRGB(240,60,60))
+		RunService.Heartbeat:Connect(function()
+			pcall(function() vNMMS.Text = tostring(totalMS()) end)
+		end)
+	end
+end
+
+-- ============================================================
+-- TELEPORT PAGE (3) — Sub-tabs: MOTOR | RESPAWN | UNDERGROUND
+-- ============================================================
+do
+	local teleportPage = menuPages[3]
+	local subPages, _ = buildSubTabs(teleportPage,
+		{"🏍 MOTOR","☠️ RESPAWN","🕳️ UNDERPOT"},
+		{C.blue, C.orange, C.cyan}
+	)
+
+	-- ── MOTOR / RESPAWN (shared location list) ──
+	local LOCATIONS = {
+		{name="🏪 Dealer NPC",      pos=Vector3.new( 770.992,  3.71,   433.75)},
+		{name="🍬 NPC Marshmallow",  pos=Vector3.new( 510.061,  4.476,  600.548)},
+		{name="🏠 Apart 1",          pos=Vector3.new(1137.992,  9.932,  449.753)},
+		{name="🏠 Apart 2",          pos=Vector3.new(1139.174,  9.932,  420.556)},
+		{name="🏠 Apart 3",          pos=Vector3.new( 984.856,  9.932,  247.280)},
+		{name="🏠 Apart 4",          pos=Vector3.new( 988.311,  9.932,  221.664)},
+		{name="🏠 Apart 5",          pos=Vector3.new( 923.954,  9.932,   42.202)},
+		{name="🏠 Apart 6",          pos=Vector3.new( 895.721,  9.932,   41.928)},
+		{name="🎰 Casino",           pos=Vector3.new(1166.33,   3.36,   -29.77)},
+		{name="⛽ GS UJUNG",         pos=Vector3.new(-466.525,  3.862,  357.661)},
+		{name="⛽ GS BINARY",        pos=Vector3.new(-280.351,  3.742,  248.872)},
+		{name="⛽ GS MID",           pos=Vector3.new( 218.427,  3.737, -176.975)},
+	}
+
+	local function buildTPList(pg, tpMode)
+		-- tpMode: "motor" or "respawn"
+		local infoCard = mkFrame(pg, Color3.fromRGB(10,14,26), 3)
+		infoCard.Size = UDim2.new(1,-24,0,30) infoCard.Position = UDim2.new(0,12,0,8)
+		corner(infoCard, 8)
+		local col = tpMode == "motor" and C.blue or C.orange
+		stroke(infoCard, col, 0.8)
+		local txt = tpMode == "motor"
+			and "🏍 Teleport kendaraan ke lokasi"
+			or  "☠️ Bunuh karakter lalu spawn di lokasi"
+		local infoL = mkLabel(infoCard, txt, tpMode == "motor" and C.txtM or C.orange, Enum.Font.Gotham, Enum.TextXAlignment.Center, 4, 9)
+		infoL.Size = UDim2.new(1,-8,1,0)
+		local tpSc = Instance.new("ScrollingFrame")
+		tpSc.Size = UDim2.new(1,0,0,330) tpSc.Position = UDim2.new(0,0,0,44)
+		tpSc.BackgroundTransparency = 1 tpSc.BorderSizePixel = 0
+		tpSc.ScrollBarThickness = 3 tpSc.ScrollBarImageColor3 = col
+		tpSc.Parent = pg
+		local lo = Instance.new("UIListLayout", tpSc)
+		lo.Padding = UDim.new(0,4) lo.SortOrder = Enum.SortOrder.LayoutOrder
+		for i, loc in ipairs(LOCATIONS) do
+			local row = mkFrame(tpSc, C.card, 3)
+			row.Size = UDim2.new(1,-6,0,34) row.LayoutOrder = i
+			corner(row, 10) stroke(row, C.line, 0.5)
+			local nm = mkLabel(row, loc.name, C.txt, Enum.Font.Gotham, Enum.TextXAlignment.Left, 4, 10)
+			nm.Size = UDim2.new(0,145,1,0) nm.Position = UDim2.new(0,10,0,0)
+			local tpW = mkFrame(row, tpMode == "motor" and C.blueD or Color3.fromRGB(140,70,20), 4)
+			tpW.Size = UDim2.new(0,72,0,24) tpW.Position = UDim2.new(1,-80,0.5,-12)
+			corner(tpW, 8)
+			local tpB = mkBtn(tpW, "Teleport", C.txt, Enum.Font.GothamBold, 5)
+			tpB.Size = UDim2.new(1,0,1,0) tpB.TextSize = 10 tpB.TextScaled = false
+			local tp = loc.pos
+			tpB.MouseButton1Click:Connect(function()
+				if tpMode == "respawn" then respawnTeleport(tp)
+				else stepTeleport(tp) end
+			end)
+			local hc = tpMode == "motor" and Color3.fromRGB(55,100,230) or Color3.fromRGB(180,90,30)
+			local nc = tpMode == "motor" and C.blueD or Color3.fromRGB(140,70,20)
+			hoverBtn(tpW, tpB, nc, hc)
+		end
+		lo:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+			task.wait()
+			tpSc.CanvasSize = UDim2.new(0,0,0,lo.AbsoluteContentSize.Y + 8)
+		end)
+	end
+
+	buildTPList(subPages[1], "motor")
+	buildTPList(subPages[2], "respawn")
+
+	-- ── UNDERGROUND + BAWAH KOMPOR ──
+	do
+		local pg = subPages[3]
+		local sc = Instance.new("ScrollingFrame")
+		sc.Size = UDim2.new(1,0,1,0) sc.CanvasSize = UDim2.new(0,0,0,680)
+		sc.BackgroundTransparency = 1 sc.BorderSizePixel = 0
+		sc.ScrollBarThickness = 3 sc.ScrollBarImageColor3 = C.cyan
+		sc.Parent = pg
+
+		-- Underground toggle
+		secHdr(sc, 8, "UNDERGROUND")
+		local ugInfoCard = mkFrame(sc, Color3.fromRGB(8,12,22), 3)
+		ugInfoCard.Size = UDim2.new(1,-24,0,38) ugInfoCard.Position = UDim2.new(0,12,0,28)
+		corner(ugInfoCard, 8)
+		local ugInfoL = mkLabel(ugInfoCard, "ON → Resize Baseplate + TP ke bawah map\nOFF → Kembali ke permukaan Y = 3", C.cyan, Enum.Font.Gotham, Enum.TextXAlignment.Center, 4, 9)
+		ugInfoL.Size = UDim2.new(1,-8,1,0) ugInfoL.TextWrapped = true
+		local ugBtnW,  ugBtnB  = actionBtn(sc, 72, "🕳️  ON (Underground)", C.blueD, C.txt)
+		local ugExitW, ugExitB = actionBtn(sc, 72, "⬆️  OFF (Ke Permukaan)", Color3.fromRGB(60,60,85), C.txt)
+		ugExitW.Visible = false
+		ugBtnB.MouseButton1Click:Connect(function()
+			enableUnderground() ugBtnW.Visible = false ugExitW.Visible = true
+		end)
+		ugExitB.MouseButton1Click:Connect(function()
+			disableUnderground() ugBtnW.Visible = true ugExitW.Visible = false
+		end)
+		hoverBtn(ugBtnW, ugBtnB, C.blueD, Color3.fromRGB(55,100,230))
+		hoverBtn(ugExitW, ugExitB, Color3.fromRGB(60,60,85), Color3.fromRGB(90,90,120))
+
+		local fixW, fixB = actionBtn(sc, 118, "🔧 Fix Baseplate (2048×5×2048)", Color3.fromRGB(90,70,25), C.txt)
+		fixB.MouseButton1Click:Connect(function()
+			local bp = findBaseplate()
+			if bp then
+				pcall(function()
+					bp.Size = Vector3.new(2048,5,2048) bp.CFrame = CFrame.new(0,-35,0)
+					bp.Anchored = true bp.Transparency = 0.3
+					setStatus("🔧 Baseplate di-resize!", Color3.fromRGB(100,180,255))
+				end)
+			else
+				setStatus("❌ Baseplate tidak ditemukan!", Color3.fromRGB(210,40,40))
+			end
+		end)
+		hoverBtn(fixW, fixB, Color3.fromRGB(90,70,25), Color3.fromRGB(130,100,40))
+
+		line(sc, 164)
+		-- Bawah Kompor / Apart selector
+		secHdr(sc, 170, "BAWAH KOMPOR — PILIH APART")
+
+		local infoCard3 = mkFrame(sc, Color3.fromRGB(10,16,26), 3)
+		infoCard3.Size = UDim2.new(1,-24,0,48) infoCard3.Position = UDim2.new(0,12,0,190)
+		corner(infoCard3, 10) stroke(infoCard3, C.cyan, 0.8)
+		local ic3L1 = mkLabel(infoCard3, "1️⃣ Pilih Apart  →  2️⃣ Hapus Floor & Stove  →  3️⃣ Bawah Kompor", C.cyan, Enum.Font.GothamBold, Enum.TextXAlignment.Left, 4, 9)
+		ic3L1.Size = UDim2.new(1,-14,0.5,0) ic3L1.Position = UDim2.new(0,10,0,4) ic3L1.TextWrapped = true
+		local ic3L2 = mkLabel(infoCard3, "⚠️ Pastikan kamu benar-benar punya apart tersebut!", C.orange, Enum.Font.Gotham, Enum.TextXAlignment.Left, 4, 9)
+		ic3L2.Size = UDim2.new(1,-14,0.5,0) ic3L2.Position = UDim2.new(0,10,0.5,0)
+
+		-- Apart selector buttons
+		local selectedApartLabel = mkFrame(sc, C.card, 3)
+		selectedApartLabel.Size = UDim2.new(1,-24,0,34) selectedApartLabel.Position = UDim2.new(0,12,0,244)
+		corner(selectedApartLabel, 10) stroke(selectedApartLabel, C.cyan, 0.7)
+		local selApartL = mkLabel(selectedApartLabel, "Dipilih: Apart 1", C.cyan, Enum.Font.GothamBold, Enum.TextXAlignment.Center, 4, 11)
+		selApartL.Size = UDim2.new(1,-8,1,0)
+
+		local apartBtnY = 284
+		local apartBtnRow1 = mkFrame(sc, Color3.fromRGB(0,0,0), 3)
+		apartBtnRow1.BackgroundTransparency = 1
+		apartBtnRow1.Size = UDim2.new(1,-24,0,32) apartBtnRow1.Position = UDim2.new(0,12,0,apartBtnY)
+		local apartBtnRow2 = mkFrame(sc, Color3.fromRGB(0,0,0), 3)
+		apartBtnRow2.BackgroundTransparency = 1
+		apartBtnRow2.Size = UDim2.new(1,-24,0,32) apartBtnRow2.Position = UDim2.new(0,12,0,apartBtnY+36)
+
+		local apartBtnFrames = {}
+		for i = 1, 6 do
+			local col = i <= 3 and C.blueD or C.purpleD
+			local row = (i <= 3) and apartBtnRow1 or apartBtnRow2
+			local idx = ((i-1) % 3)
+			local bw = mkFrame(row, col, 4)
+			bw.Size = UDim2.new(1/3,-4,1,0) bw.Position = UDim2.new(idx/3, idx==0 and 0 or 4, 0, 0)
+			corner(bw, 8)
+			local bb = mkBtn(bw, "Apart "..i, C.txt, Enum.Font.GothamBold, 5)
+			bb.Size = UDim2.new(1,0,1,0) bb.TextSize = 10 bb.TextScaled = false
+			apartBtnFrames[i] = {w=bw, b=bb, col=col}
+			local apartIdx = i
+			bb.MouseButton1Click:Connect(function()
+				selectedApart = apartIdx
+				selApartL.Text = "Dipilih: Apart " .. apartIdx
+				for j = 1, 6 do
+					local selected = (j == apartIdx)
+					TweenService:Create(apartBtnFrames[j].w, TweenInfo.new(0.12),
+						{BackgroundColor3 = selected and C.cyan or apartBtnFrames[j].col}):Play()
+					apartBtnFrames[j].b.TextColor3 = selected and Color3.fromRGB(8,20,30) or C.txt
+				end
+			end)
+			hoverBtn(bw, bb, col, C.cyan)
+		end
+
+		-- Hapus Floor + Stove button
+		local hapusStatusBox = mkFrame(sc, Color3.fromRGB(12,14,24), 3)
+		hapusStatusBox.Size = UDim2.new(1,-24,0,28) hapusStatusBox.Position = UDim2.new(0,12,0,apartBtnY+76)
+		corner(hapusStatusBox, 8) stroke(hapusStatusBox, C.line, 0.5)
+		local hapusStatL = mkLabel(hapusStatusBox, "Pilih apart lalu hapus floor & stove", C.txtD, Enum.Font.Gotham, Enum.TextXAlignment.Center, 4, 10)
+		hapusStatL.Size = UDim2.new(1,-8,1,0)
+
+		local hapusW, hapusB = actionBtn(sc, apartBtnY+110, "🗑️  Hapus Floor & Stove Apart", Color3.fromRGB(120,30,30), C.txt)
+		hapusB.MouseButton1Click:Connect(function()
+			local ok, msg = deleteApartFloorStove(selectedApart)
+			hapusStatL.Text = msg
+			hapusStatL.TextColor3 = ok and C.green or C.red
+			setStatus(msg, ok and C.green or C.red)
+			if ok then
+				TweenService:Create(hapusW, TweenInfo.new(0.12), {BackgroundColor3=C.green}):Play()
+				task.delay(0.6, function() TweenService:Create(hapusW, TweenInfo.new(0.2), {BackgroundColor3=Color3.fromRGB(120,30,30)}):Play() end)
+			end
+		end)
+		hoverBtn(hapusW, hapusB, Color3.fromRGB(120,30,30), Color3.fromRGB(180,45,45))
+
+		-- Bawah Kompor button
+		local bkW, bkB = actionBtn(sc, apartBtnY+158, "🍳  Masuk Bawah Kompor Apart", C.cyanD, Color3.fromRGB(8,20,30))
+		bkB.MouseButton1Click:Connect(function()
+			doUndergroundApart(selectedApart)
+		end)
+		hoverBtn(bkW, bkB, C.cyanD, C.cyan)
+
+		line(sc, apartBtnY+204)
+		-- Per-apart quick buttons
+		secHdr(sc, apartBtnY+210, "QUICK ACCESS PER APART")
+		for i = 1, 6 do
+			local data = APART_DATA[i]
+			local y2 = apartBtnY+230+(i-1)*42
+			local qrow = mkFrame(sc, C.card, 3)
+			qrow.Size = UDim2.new(1,-24,0,36) qrow.Position = UDim2.new(0,12,0,y2)
+			corner(qrow, 10) stroke(qrow, C.line, 0.5)
+			local qnm = mkLabel(qrow, data.name, C.txt, Enum.Font.Gotham, Enum.TextXAlignment.Left, 4, 10)
+			qnm.Size = UDim2.new(0,80,1,0) qnm.Position = UDim2.new(0,10,0,0)
+			-- Hapus
+			local qhW = mkFrame(qrow, Color3.fromRGB(100,25,25), 4)
+			qhW.Size = UDim2.new(0,60,0,24) qhW.Position = UDim2.new(1,-138,0.5,-12)
+			corner(qhW, 8)
+			local qhB = mkBtn(qhW, "🗑 Hapus", C.txt, Enum.Font.GothamBold, 5)
+			qhB.Size = UDim2.new(1,0,1,0) qhB.TextSize = 8 qhB.TextScaled = false
+			local apartI = i
+			qhB.MouseButton1Click:Connect(function()
+				local ok, msg = deleteApartFloorStove(apartI)
+				setStatus(msg, ok and C.green or C.red)
+			end)
+			hoverBtn(qhW, qhB, Color3.fromRGB(100,25,25), Color3.fromRGB(160,40,40))
+			-- Bawah Kompor
+			local qbW = mkFrame(qrow, C.cyanD, 4)
+			qbW.Size = UDim2.new(0,66,0,24) qbW.Position = UDim2.new(1,-70,0.5,-12)
+			corner(qbW, 8)
+			local qbB = mkBtn(qbW, "🍳 Kompor", Color3.fromRGB(8,20,30), Enum.Font.GothamBold, 5)
+			qbB.Size = UDim2.new(1,0,1,0) qbB.TextSize = 8 qbB.TextScaled = false
+			qbB.MouseButton1Click:Connect(function()
+				doUndergroundApart(apartI)
+			end)
+			hoverBtn(qbW, qbB, C.cyanD, C.cyan)
+		end
+
+		-- update canvas
+		local totalH = apartBtnY + 230 + 6*42 + 20
+		sc.CanvasSize = UDim2.new(0,0,0,totalH)
+	end
+end
+
+-- ============================================================
+-- FEATURE PAGE (4) — Sub-tabs: BLINK | ANTI RK | MACRO F | UNDERGROUND | DELETE
+-- ============================================================
+do
+	local featurePage = menuPages[4]
+	local subPages, _ = buildSubTabs(featurePage,
+		{"⚡ BLINK","🛡 ANTI RK","🔫 MACRO","🕳 UNDGRND","🗑 DELETE"},
+		{C.cyan, C.red, C.purple, C.blue, Color3.fromRGB(255,80,80)}
+	)
+
+	-- ── BLINK ──
+	do
+		local pg = subPages[1]
+		local blinkInfoCard = mkFrame(pg, Color3.fromRGB(10,14,26), 3)
+		blinkInfoCard.Size = UDim2.new(1,-24,0,30) blinkInfoCard.Position = UDim2.new(0,12,0,8)
+		corner(blinkInfoCard, 8)
+		mkLabel(blinkInfoCard, "Tekan [T] untuk maju 6 studs saat aktif", C.txtD, Enum.Font.Gotham, Enum.TextXAlignment.Center, 4, 9).Size = UDim2.new(1,-8,1,0)
+		local blinkEnabled = false
+		mkToggle(pg, 44, "⚡ Blink TP  [T]", C.cyan, function(v)
+			blinkEnabled = v
+			setStatus(v and "⚡ Blink TP aktif! [T]" or "Blink TP nonaktif.", v and C.cyan or Color3.fromRGB(160,160,180))
+		end)
+		UIS.InputBegan:Connect(function(i, gp)
+			if gp then return end
+			if i.KeyCode == Enum.KeyCode.T and blinkEnabled then
+				local ch   = player.Character
+				local root = ch and ch:FindFirstChild("HumanoidRootPart")
+				if root then root.CFrame = root.CFrame + root.CFrame.LookVector * 6 end
+			end
+		end)
+	end
+
+	-- ── ANTI RK ──
+	do
+		local pg = subPages[2]
+		local sc = Instance.new("ScrollingFrame")
+		sc.Size = UDim2.new(1,0,1,0) sc.CanvasSize = UDim2.new(0,0,0,400)
+		sc.BackgroundTransparency = 1 sc.BorderSizePixel = 0
+		sc.ScrollBarThickness = 3 sc.ScrollBarImageColor3 = C.red
+		sc.Parent = pg
+		secHdr(sc, 8, "ANTI RK")
+		local rkInfoCard = mkFrame(sc, Color3.fromRGB(22,10,10), 3)
+		rkInfoCard.Size = UDim2.new(1,-24,0,38) rkInfoCard.Position = UDim2.new(0,12,0,28)
+		corner(rkInfoCard, 10) stroke(rkInfoCard, C.red, 0.8)
+		local rkInfoL = mkLabel(rkInfoCard, "Jika ada pemain mendekat saat Auto aktif, otomatis ke penjara 1 menit lalu balik.", C.red, Enum.Font.Gotham, Enum.TextXAlignment.Left, 4, 9)
+		rkInfoL.Size = UDim2.new(1,-16,1,0) rkInfoL.Position = UDim2.new(0,10,0,0) rkInfoL.TextWrapped = true
+		mkToggle(sc, 72, "🛡  Enable Anti RK", C.red, function(v)
+			antiRkEnabled = v
+			if v then setAntiRkStatus("🛡 Anti RK aktif. Memantau...", Color3.fromRGB(52,210,110))
+			else setAntiRkStatus("❌ Anti RK nonaktif.", Color3.fromRGB(160,160,180)) end
+		end)
+		local getAntiRkRadius = stepperRow(sc, 118, "Radius Deteksi", 5, 100, 40, "m")
+		local rkStatBox = mkFrame(sc, Color3.fromRGB(12,14,24), 3)
+		rkStatBox.Size = UDim2.new(1,-24,0,30) rkStatBox.Position = UDim2.new(0,12,0,172)
+		corner(rkStatBox, 10) stroke(rkStatBox, C.line, 0.5)
+		local rkStatL = mkLabel(rkStatBox, "Anti RK nonaktif", C.txtM, Enum.Font.Gotham, Enum.TextXAlignment.Center, 4, 10)
+		rkStatL.Size = UDim2.new(1,-8,1,0) rkStatL.Position = UDim2.new(0,4,0,0)
+		antiRkStatusLabel = rkStatL
+		RunService.Heartbeat:Connect(function() ANTI_RK_RADIUS = getAntiRkRadius() end)
+		local prisonCard = mkFrame(sc, C.card, 3)
+		prisonCard.Size = UDim2.new(1,-24,0,28) prisonCard.Position = UDim2.new(0,12,0,208)
+		corner(prisonCard, 8)
+		mkLabel(prisonCard, "🔒 Penjara: 551, 3.6, -564  •  Durasi: 1 menit", C.txtD, Enum.Font.Gotham, Enum.TextXAlignment.Center, 4, 9).Size = UDim2.new(1,-8,1,0)
+	end
+
+	-- ── MACRO F ──
+	do
+		local pg = subPages[3]
+		local sc = Instance.new("ScrollingFrame")
+		sc.Size = UDim2.new(1,0,1,0) sc.CanvasSize = UDim2.new(0,0,0,320)
+		sc.BackgroundTransparency = 1 sc.BorderSizePixel = 0
+		sc.ScrollBarThickness = 3 sc.ScrollBarImageColor3 = C.purple
+		sc.Parent = pg
+		secHdr(sc, 8, "MACRO F — AUTO KOKANG")
+		local macroInfoCard = mkFrame(sc, Color3.fromRGB(16,10,24), 3)
+		macroInfoCard.Size = UDim2.new(1,-24,0,38) macroInfoCard.Position = UDim2.new(0,12,0,28)
+		corner(macroInfoCard, 10) stroke(macroInfoCard, C.purple, 0.8)
+		local macroInfo1 = mkLabel(macroInfoCard, "Spam F otomatis saat trigger ditahan.", C.txtM, Enum.Font.Gotham, Enum.TextXAlignment.Left, 4, 9)
+		macroInfo1.Size = UDim2.new(1,-16,0.5,0) macroInfo1.Position = UDim2.new(0,10,0,4) macroInfo1.TextWrapped = true
+		local macroInfo2 = mkLabel(macroInfoCard, "⚠️ Aktifkan saat pegang senjata", C.purple, Enum.Font.GothamBold, Enum.TextXAlignment.Left, 4, 9)
+		macroInfo2.Size = UDim2.new(1,-16,0.5,0) macroInfo2.Position = UDim2.new(0,10,0.5,0)
+		mkToggle(sc, 72, "🔫  Enable Macro F", C.purple, function(v)
+			macroFEnabled = v macroFHeld = false
+			setStatus(v and "🔫 Macro F aktif!" or "Macro F nonaktif.", v and C.purple or Color3.fromRGB(160,160,180))
+		end)
+		local getMacroInterval = stepperRowFloat(sc, 118, "Interval Spam F", 0.1, 1.5, 0.3, 0.1, "s")
+		RunService.Heartbeat:Connect(function() macroFInterval = getMacroInterval() end)
+	end
+
+	-- ── UNDERGROUND ──
+	do
+		local pg = subPages[4]
+		local sc = Instance.new("ScrollingFrame")
+		sc.Size = UDim2.new(1,0,1,0) sc.CanvasSize = UDim2.new(0,0,0,280)
+		sc.BackgroundTransparency = 1 sc.BorderSizePixel = 0
+		sc.ScrollBarThickness = 3 sc.ScrollBarImageColor3 = C.blue
+		sc.Parent = pg
+		secHdr(sc, 8, "UNDERGROUND")
+		local ugInfoCard = mkFrame(sc, Color3.fromRGB(8,12,22), 3)
+		ugInfoCard.Size = UDim2.new(1,-24,0,38) ugInfoCard.Position = UDim2.new(0,12,0,28)
+		corner(ugInfoCard, 8)
+		local ugInfoL = mkLabel(ugInfoCard, "ON → Resize Baseplate + TP ke bawah map\nOFF → Kembali ke permukaan Y = 3", C.cyan, Enum.Font.Gotham, Enum.TextXAlignment.Center, 4, 9)
+		ugInfoL.Size = UDim2.new(1,-8,1,0) ugInfoL.TextWrapped = true
+		local ugBtnW2,  ugBtnB2  = actionBtn(sc, 72, "🕳️  ON (Underground)", C.blueD, C.txt)
+		local ugExitW2, ugExitB2 = actionBtn(sc, 72, "⬆️  OFF (Ke Permukaan)", Color3.fromRGB(60,60,85), C.txt)
+		ugExitW2.Visible = false
+		ugBtnB2.MouseButton1Click:Connect(function()
+			enableUnderground() ugBtnW2.Visible = false ugExitW2.Visible = true
+		end)
+		ugExitB2.MouseButton1Click:Connect(function()
+			disableUnderground() ugBtnW2.Visible = true ugExitW2.Visible = false
+		end)
+		hoverBtn(ugBtnW2, ugBtnB2, C.blueD, Color3.fromRGB(55,100,230))
+		hoverBtn(ugExitW2, ugExitB2, Color3.fromRGB(60,60,85), Color3.fromRGB(90,90,120))
+		local fixW2, fixB2 = actionBtn(sc, 118, "🔧 Fix Baseplate (2048×5×2048)", Color3.fromRGB(90,70,25), C.txt)
+		fixB2.MouseButton1Click:Connect(function()
+			local bp = findBaseplate()
+			if bp then
+				pcall(function()
+					bp.Size = Vector3.new(2048,5,2048) bp.CFrame = CFrame.new(0,-35,0)
+					bp.Anchored = true bp.Transparency = 0.3
+					setStatus("🔧 Baseplate di-resize!", Color3.fromRGB(100,180,255))
+				end)
+			end
+		end)
+		hoverBtn(fixW2, fixB2, Color3.fromRGB(90,70,25), Color3.fromRGB(130,100,40))
+	end
+
+	-- ── DELETE PART ──
+	do
+		local pg = subPages[5]
+		local sc = Instance.new("ScrollingFrame")
+		sc.Size = UDim2.new(1,0,1,0) sc.CanvasSize = UDim2.new(0,0,0,420)
+		sc.BackgroundTransparency = 1 sc.BorderSizePixel = 0
+		sc.ScrollBarThickness = 3 sc.ScrollBarImageColor3 = Color3.fromRGB(255,80,80)
+		sc.Parent = pg
+		secHdr(sc, 8, "DELETE PART")
+		local dpInfoCard = mkFrame(sc, Color3.fromRGB(22,8,8), 3)
+		dpInfoCard.Size = UDim2.new(1,-24,0,46) dpInfoCard.Position = UDim2.new(0,12,0,28)
+		corner(dpInfoCard, 8) stroke(dpInfoCard, Color3.fromRGB(60,20,20), 0.5)
+		local dpTxt = mkLabel(dpInfoCard, "🖥️  Desktop: Tahan ALT + Klik kiri pada part", C.txtD, Enum.Font.Gotham, Enum.TextXAlignment.Left, 4, 10)
+		dpTxt.Size = UDim2.new(1,-8,0.5,0) dpTxt.Position = UDim2.new(0,8,0,0)
+		local mbTxt2 = mkLabel(dpInfoCard, "📱  Mobile: Tahan sentuh 0.8 detik pada part", C.txtD, Enum.Font.Gotham, Enum.TextXAlignment.Left, 4, 10)
+		mbTxt2.Size = UDim2.new(1,-8,0.5,0) mbTxt2.Position = UDim2.new(0,8,0.5,0)
+		mkToggle(sc, 80, "🗑️  Delete Part", Color3.fromRGB(255,80,80), function(v)
+			altDeleteEnabled = v
+			setStatus(v and "🗑️ Delete Part aktif!" or "Delete Part nonaktif.", v and Color3.fromRGB(255,80,80) or Color3.fromRGB(160,160,180))
+		end)
+		local statsRow2 = mkFrame(sc, C.card, 3)
+		statsRow2.Size = UDim2.new(1,-24,0,28) statsRow2.Position = UDim2.new(0,12,0,126)
+		corner(statsRow2, 8) stroke(statsRow2, C.line, 0.5)
+		local delStatL = mkLabel(statsRow2, "Deleted: 0", Color3.fromRGB(255,100,100), Enum.Font.GothamBold, Enum.TextXAlignment.Left, 4, 10)
+		delStatL.Size = UDim2.new(0.5,-4,1,0) delStatL.Position = UDim2.new(0,12,0,0)
+		deleteCountLabel = delStatL
+		local undoStatL = mkLabel(statsRow2, "Undo: 0", Color3.fromRGB(100,210,160), Enum.Font.GothamBold, Enum.TextXAlignment.Right, 4, 10)
+		undoStatL.Size = UDim2.new(0.5,-4,1,0) undoStatL.Position = UDim2.new(0.5,-8,0,0)
+		undoCountLabel = undoStatL
+		line(sc, 160)
+		local undoBtnW, undoBtnB = actionBtn(sc, 168, "↩️  Undo Delete Terakhir", Color3.fromRGB(30,75,60), C.txt)
+		hoverBtn(undoBtnW, undoBtnB, Color3.fromRGB(30,75,60), Color3.fromRGB(45,110,85))
+		undoBtnB.MouseButton1Click:Connect(function() undoLastDelete() end)
+		local undoAllW, undoAllB = actionBtn(sc, 214, "↩️  Undo Semua", Color3.fromRGB(55,40,20), C.txt)
+		hoverBtn(undoAllW, undoAllB, Color3.fromRGB(55,40,20), Color3.fromRGB(85,65,35))
+		undoAllB.MouseButton1Click:Connect(function()
+			if #deleteHistory == 0 then
+				setStatus("⚠️ Tidak ada part untuk di-undo!", Color3.fromRGB(255,200,60))
+				return
+			end
+			local restored = 0
+			while #deleteHistory > 0 do
+				if undoLastDelete() then restored += 1 end
+			end
+			setStatus("↩️ " .. restored .. " part dikembalikan!", Color3.fromRGB(80,210,160))
+		end)
+	end
+end
+
+-- ============================================================
+-- ESP PAGE (5) — Sub-tabs: TOGGLE | SETTING
+-- ============================================================
+do
+	local espPage = menuPages[5]
+	local subPages, _ = buildSubTabs(espPage,
+		{"👁 ESP","⚙️ SETTING"},
+		{C.blue, C.cyan}
+	)
+
+	pcall(function()
+		if game.CoreGui:FindFirstChild("PatESP") then game.CoreGui.PatESP:Destroy() end
+	end)
+	if playerGui:FindFirstChild("PatESP") then playerGui.PatESP:Destroy() end
+	local espSg = Instance.new("ScreenGui")
+	espSg.Name = "PatESP" espSg.ResetOnSpawn = false espSg.IgnoreGuiInset = true
+	espSg.DisplayOrder = 999
+	pcall(function() espSg.Parent = game.CoreGui end)
+	if espSg.Parent ~= game.CoreGui then espSg.Parent = playerGui end
+
+	local espEnabled = false
+	local ESP_CFG    = {username=true, box=true, healthBar=true}
+	local espCache   = {}
+
+	local function mkESPLabel(txt, col, sz)
+		local l = Instance.new("TextLabel", espSg)
+		l.BackgroundTransparency = 1 l.BorderSizePixel = 0
+		l.TextColor3 = col l.TextStrokeTransparency = 0.4 l.TextStrokeColor3 = Color3.new(0,0,0)
+		l.Font = Enum.Font.GothamBold l.TextScaled = false l.TextSize = sz or 11
+		l.ZIndex = 10 l.Text = txt l.Size = UDim2.new(0,120,0,14)
+		l.AnchorPoint = Vector2.new(0.5,0.5) l.Visible = false
+		return l
+	end
+	local function mkESPFrame(col, alpha, thick)
+		local f = Instance.new("Frame", espSg)
+		f.BackgroundColor3 = col f.BackgroundTransparency = alpha or 1
+		f.BorderSizePixel = 0 f.ZIndex = 8 f.Visible = false
+		if thick then
+			local s = Instance.new("UIStroke", f) s.Color = col s.Thickness = thick
+		end
+		return f
+	end
+	local function getESPData(plr)
+		if espCache[plr] then return espCache[plr] end
+		local d = {
+			name     = mkESPLabel("", Color3.fromRGB(255,255,255), 11),
+			box      = mkESPFrame(Color3.fromRGB(255,60,60), 1, 1.5),
+			healthBg = mkESPFrame(Color3.fromRGB(20,20,20), 0, 0),
+			healthFg = mkESPFrame(Color3.fromRGB(50,210,80), 0, 0),
+		}
+		espCache[plr] = d return d
+	end
+	local function hideESPData(d)
+		if not d then return end
+		d.name.Visible = false d.box.Visible = false
+		d.healthBg.Visible = false d.healthFg.Visible = false
+	end
+	local function clearESP(plr)
+		local d = espCache[plr]
+		if not d then return end
+		pcall(function() d.name:Destroy() d.box:Destroy() d.healthBg:Destroy() d.healthFg:Destroy() end)
+		espCache[plr] = nil
+	end
+
+	RunService.RenderStepped:Connect(function()
+		if not espEnabled then
+			for _, d in pairs(espCache) do hideESPData(d) end
+			return
+		end
+		local cam = workspace.CurrentCamera
+		for _, plr in ipairs(Players:GetPlayers()) do
+			if plr == player then continue end
+			local ch   = plr.Character
+			local hrpT = ch and ch:FindFirstChild("HumanoidRootPart")
+			local hum  = ch and ch:FindFirstFind("Humanoid")
+			if not ch or not hrpT or not hum or hum.Health <= 0 then
+				hideESPData(espCache[plr]) continue
+			end
+			local d = getESPData(plr)
+			local sp, onScreen = cam:WorldToViewportPoint(hrpT.Position)
+			if not onScreen then hideESPData(d) continue end
+			local head = ch:FindFirstChild("Head")
+			local hp   = head and cam:WorldToViewportPoint(head.Position + Vector3.new(0,0.5,0)) or sp
+			local fp   = cam:WorldToViewportPoint(hrpT.Position - Vector3.new(0,2.5,0))
+			local charH = math.abs(hp.Y - fp.Y)
+			if charH < 10 then charH = 60 end
+			local charW = charH * 0.45
+			local cx    = sp.X
+			d.name.Visible = ESP_CFG.username
+			if ESP_CFG.username then
+				d.name.Text = plr.Name
+				d.name.Position = UDim2.new(0, cx, 0, hp.Y - 16)
+			end
+			d.box.Visible = ESP_CFG.box
+			if ESP_CFG.box then
+				d.box.Position = UDim2.new(0, cx - charW/2, 0, hp.Y)
+				d.box.Size = UDim2.new(0, charW, 0, charH)
+				d.box.BackgroundTransparency = 1
+			end
+			local ratio = math.clamp(hum.Health / math.max(hum.MaxHealth,1), 0, 1)
+			d.healthBg.Visible = ESP_CFG.healthBar d.healthFg.Visible = ESP_CFG.healthBar
+			if ESP_CFG.healthBar then
+				local bx = cx - charW/2 - 6
+				local by = hp.Y
+				d.healthBg.Position = UDim2.new(0,bx,0,by) d.healthBg.Size = UDim2.new(0,4,0,charH)
+				d.healthBg.BackgroundTransparency = 0
+				d.healthFg.Position = UDim2.new(0,bx,0,by+charH*(1-ratio))
+				d.healthFg.Size = UDim2.new(0,4,0,charH*ratio)
+				d.healthFg.BackgroundTransparency = 0
+				d.healthFg.BackgroundColor3 = Color3.fromRGB(math.floor(255*(1-ratio)), math.floor(200*ratio), 30)
+			end
+		end
+		for plr in pairs(espCache) do
+			if not plr.Parent then clearESP(plr) end
+		end
+	end)
+	Players.PlayerRemoving:Connect(clearESP)
+
+	-- ESP Toggle page
+	do
+		local pg = subPages[1]
+		secHdr(pg, 8, "ESP PLAYER")
+		mkToggle(pg, 28, "👁  Enable ESP", C.blue, function(v)
+			espEnabled = v
+			if not v then for _, d in pairs(espCache) do hideESPData(d) end end
+		end)
+	end
+	-- ESP Settings page
+	do
+		local pg = subPages[2]
+		secHdr(pg, 8, "FITUR ESP")
+		mkToggle(pg, 28, "👤  Username",     Color3.fromRGB(255,255,255), function(v) ESP_CFG.username  = v end)
+		mkToggle(pg, 74, "📦  Bounding Box", Color3.fromRGB(255,60,60),   function(v) ESP_CFG.box       = v end)
+		mkToggle(pg, 120,"❤️  Health Bar",   Color3.fromRGB(50,210,80),   function(v) ESP_CFG.healthBar = v end)
+	end
+end
+
+-- ============================================================
+-- COMBAT PAGE (6) — Sub-tabs: HITBOX | AIM ASSIST
+-- ============================================================
+do
+	local combatPage = menuPages[6]
+	local subPages, _ = buildSubTabs(combatPage,
+		{"📦 HITBOX","🎯 AIM"},
+		{C.red, C.orange}
+	)
+
+	-- ── HITBOX ──
+	do
+		local pg = subPages[1]
+		local sc = Instance.new("ScrollingFrame")
+		sc.Size = UDim2.new(1,0,1,0) sc.CanvasSize = UDim2.new(0,0,0,280)
+		sc.BackgroundTransparency = 1 sc.BorderSizePixel = 0
+		sc.ScrollBarThickness = 3 sc.ScrollBarImageColor3 = C.red
+		sc.Parent = pg
+		secHdr(sc, 8, "HITBOX EXPANDER PRO v2")
+		mkToggle(sc, 28, "📦  Hitbox Expander", C.red, function(v)
+			hitboxEnabled = v
+			if not v then hbRevertAll() end
+		end)
+		local sizeCard = mkFrame(sc, C.card, 3)
+		sizeCard.Size = UDim2.new(1,-24,0,48) sizeCard.Position = UDim2.new(0,12,0,74)
+		corner(sizeCard, 10) stroke(sizeCard, C.line, 0.5)
+		local szHdr = mkLabel(sizeCard, "Ukuran Hitbox", C.txtM, Enum.Font.Gotham, Enum.TextXAlignment.Left, 4, 10)
+		szHdr.Size = UDim2.new(0.45,0,0,18) szHdr.Position = UDim2.new(0,10,0,4)
+		local szPresets = {{"5",Vector3.new(5,5,5)},{"10",Vector3.new(10,10,10)},{"15",Vector3.new(15,15,15)},{"20",Vector3.new(20,20,20)}}
+		local szValL = mkLabel(sizeCard, "10×10×10", C.red, Enum.Font.GothamBold, Enum.TextXAlignment.Right, 4, 11)
+		szValL.Size = UDim2.new(0.5,-10,0,18) szValL.Position = UDim2.new(0.5,0,0,4)
+		for pi, preset in ipairs(szPresets) do
+			local pw = mkFrame(sizeCard, C.blueD, 4)
+			pw.Size = UDim2.new(0,38,0,22) pw.Position = UDim2.new(0,8+(pi-1)*44,0,22) corner(pw, 7)
+			local pb = mkBtn(pw, preset[1], C.txt, Enum.Font.GothamBold, 5, 11)
+			pb.Size = UDim2.new(1,0,1,0) pb.TextScaled = false
+			local pVal = preset[2]
+			pb.MouseButton1Click:Connect(function()
+				hitboxSize = pVal szValL.Text = preset[1].."×"..preset[1].."×"..preset[1]
+				TweenService:Create(pw, TweenInfo.new(0.05), {BackgroundColor3=C.red}):Play()
+				task.delay(0.15, function() TweenService:Create(pw, TweenInfo.new(0.15), {BackgroundColor3=C.blueD}):Play() end)
+			end)
+			hoverBtn(pw, pb, C.blueD, C.blue)
+		end
+		local ncBadge = mkFrame(sc, Color3.fromRGB(10,14,24), 3)
+		ncBadge.Size = UDim2.new(1,-24,0,24) ncBadge.Position = UDim2.new(0,12,0,128)
+		corner(ncBadge, 8) stroke(ncBadge, C.red, 0.5)
+		mkLabel(ncBadge, "🛡 Anti-Mental: NoCollisionConstraint aktif", C.txtM, Enum.Font.Gotham, Enum.TextXAlignment.Center, 4, 9).Size = UDim2.new(1,-8,1,0)
+	end
+
+	-- ── AIM ASSIST ──
+	do
+		local pg = subPages[2]
+		local sc = Instance.new("ScrollingFrame")
+		sc.Size = UDim2.new(1,0,1,0) sc.CanvasSize = UDim2.new(0,0,0,320)
+		sc.BackgroundTransparency = 1 sc.BorderSizePixel = 0
+		sc.ScrollBarThickness = 3 sc.ScrollBarImageColor3 = C.orange
+		sc.Parent = pg
+		secHdr(sc, 8, "AIM ASSIST")
+		local aimInfoCard = mkFrame(sc, Color3.fromRGB(10,14,26), 3)
+		aimInfoCard.Size = UDim2.new(1,-24,0,24) aimInfoCard.Position = UDim2.new(0,12,0,28)
+		corner(aimInfoCard, 8) stroke(aimInfoCard, C.orange, 0.5)
+		mkLabel(aimInfoCard, "🖱 PC: Klik RMB untuk Lock/Unlock target aim", C.orange, Enum.Font.GothamBold, Enum.TextXAlignment.Center, 4, 9).Size = UDim2.new(1,-8,1,0)
+		mkToggle(sc, 58, "🎯  Aim Assist", C.orange, function(v)
+			aimAssistEnabled = v
+			if not v then fovContainer.Visible = false aimLocked = false aimLockedPart = nil end
+		end)
+		mkToggle(sc, 104, "⭕  FOV Circle", C.gold, function(v)
+			aimFOVEnabled = v
+			if not v then fovContainer.Visible = false end
+		end)
+		local getCombatAimStrength = stepperRowFloat(sc, 150, "Kekuatan Aim (Smooth)", 0.05, 1.0, 0.25, 0.05, "")
+		local getCombatAimRadius   = stepperRow(sc, 204, "FOV Radius (px)", 30, 500, 120, "px")
+		RunService.Heartbeat:Connect(function()
+			aimAssistStrength = getCombatAimStrength()
+			aimAssistRadius   = getCombatAimRadius()
+		end)
+	end
+end
+
+-- ============================================================
+-- CREDIT PAGE (7)
+-- ============================================================
+do
+	local creditPage = menuPages[7]
+	local creditCard = mkFrame(creditPage, Color3.fromRGB(12,14,24), 3)
+	creditCard.Size = UDim2.new(1,-24,0,120) creditCard.Position = UDim2.new(0,12,0,16)
+	corner(creditCard, 14) glowStroke(creditCard, C.purple, 2)
+	addGradient(creditCard, Color3.fromRGB(16,10,30), Color3.fromRGB(10,16,28), 135)
+	local logoL = mkLabel(creditCard, "⭐", C.gold, Enum.Font.GothamBold, Enum.TextXAlignment.Center, 4, 32)
+	logoL.Size = UDim2.new(1,0,0,44) logoL.Position = UDim2.new(0,0,0,8)
+	local nameL = mkLabel(creditCard, "PatStore Script", C.txt, Enum.Font.GothamBold, Enum.TextXAlignment.Center, 4, 16)
+	nameL.Size = UDim2.new(1,0,0,24) nameL.Position = UDim2.new(0,0,0,50)
+	local verL2 = mkLabel(creditCard, "v12.0 — SUB-TABS + NO MOTOR + UNDERPOT", C.purple, Enum.Font.GothamBold, Enum.TextXAlignment.Center, 4, 10)
+	verL2.Size = UDim2.new(1,0,0,20) verL2.Position = UDim2.new(0,0,0,74)
+	local divL = mkLabel(creditCard, "by PatStore Dev Team", C.txtM, Enum.Font.Gotham, Enum.TextXAlignment.Center, 4, 10)
+	divL.Size = UDim2.new(1,0,0,16) divL.Position = UDim2.new(0,0,0,96)
+
+	local featureData = {
+		{icon="🌾", txt="Farm: Masak / Jual / Beli / Stats (sub-tab)"},
+		{icon="⚡", txt="Fully Motor & Fully No Motor (sub-tab)"},
+		{icon="🗺", txt="Teleport: Motor / Respawn / Underpot (sub-tab)"},
+		{icon="🕳", txt="Underpot: Pilih Apart + Hapus Floor+Stove"},
+		{icon="🛡", txt="Feature: Blink / Anti RK / Macro / UG / Delete"},
+		{icon="👁", txt="ESP: Username + Box + Health Bar"},
+		{icon="⚔️", txt="Combat: Hitbox Expander + Aim Assist (sub-tab)"},
+		{icon="🚶", txt="Fully No Motor — Underground TP otomatis"},
+		{icon="⭕", txt="FOV Circle + RMB Lock Aim (PC)"},
+	}
+	for i, fd in ipairs(featureData) do
+		local fy  = 148 + (i-1)*32
+		local row = mkFrame(creditPage, C.card, 3)
+		row.Size = UDim2.new(1,-24,0,26) row.Position = UDim2.new(0,12,0,fy)
+		corner(row, 8) stroke(row, C.line, 0.5)
+		local icL2 = mkLabel(row, fd.icon, C.txt, Enum.Font.Gotham, Enum.TextXAlignment.Center, 4, 13)
+		icL2.Size = UDim2.new(0,26,1,0)
+		local txL2 = mkLabel(row, fd.txt, C.txtM, Enum.Font.Gotham, Enum.TextXAlignment.Left, 4, 9)
+		txL2.Size = UDim2.new(1,-34,1,0) txL2.Position = UDim2.new(0,30,0,0)
+	end
+end
